@@ -192,6 +192,30 @@ pub fn create_tables(conn: &Connection) {
             created_at TEXT DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            -- Filename inside the artifact root. Generated, never taken from input.
+            stored_name TEXT NOT NULL,
+            -- Repo-relative path the agent wrote, normalised out of the worktree so
+            -- the same document edited by two tasks stays one artifact.
+            source_rel_path TEXT NOT NULL,
+            title TEXT,
+            preview TEXT DEFAULT '',
+            kind TEXT DEFAULT 'other',
+            size INTEGER DEFAULT 0,
+            origin_task_id INTEGER,
+            last_task_id INTEGER,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            -- SET NULL, not CASCADE: deleting a task must not delete the document
+            -- it produced. The document is the point.
+            FOREIGN KEY (origin_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+            FOREIGN KEY (last_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+            UNIQUE(project_id, source_rel_path)
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -215,6 +239,7 @@ pub fn create_tables(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_deps_task ON task_dependencies(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_deps_parent ON task_dependencies(depends_on_id)",
+        "CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, updated_at DESC)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_key_unique ON tasks(task_key) WHERE task_key != ''",
         "CREATE INDEX IF NOT EXISTS idx_scans_project ON scans(project_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_task_logs_task_type ON task_logs(task_id, log_type)",
