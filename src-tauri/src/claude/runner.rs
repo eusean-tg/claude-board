@@ -481,27 +481,68 @@ fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {
     );
 }
 
+/// True when every commit on `branch` is already reachable from `base`.
+///
+/// Deleting a task branch destroys its commits unless they survive somewhere
+/// else, and `git branch -D` will do that without asking. Anything short of a
+/// clean yes — a base branch that does not exist, a repo git cannot read, git
+/// missing entirely — answers false, so the branch is kept.
+///
+/// `base` is resolved locally. A branch merged only on the remote reads as
+/// unmerged here, which errs toward keeping a branch that is safe to delete
+/// rather than deleting one that is not.
+fn branch_is_merged_into(branch: &str, base: &str, working_dir: &str) -> bool {
+    let mut cmd = crate::child_env::command("git");
+    cmd.args(["merge-base", "--is-ancestor", branch, base])
+        .current_dir(working_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// What `cleanup_task_branch` did, so the caller can tell the user about it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BranchCleanup {
+    /// Nothing to do: branching disabled, a PR may still need the branch, no
+    /// branch recorded, or the branch *is* the base branch.
+    Skipped,
+    /// Branch deleted. Its commits are reachable from the base branch.
+    Deleted,
+    /// Branch kept: deleting it would have destroyed the only copy of its commits.
+    KeptUnmerged { branch: String, base: String },
+}
+
 /// Delete feature branch (local + remote) and worktree after task completion.
 /// Skips if auto_pr is enabled (branch needed for open PR).
-/// Only acts if task has a branch and branch is not the base branch.
-pub fn cleanup_task_branch(task: &tasks::Task, working_dir: &str, project: &projects::Project) {
+/// Only acts if task has a branch, the branch is not the base branch, and the
+/// branch's commits are already reachable from the base branch.
+///
+/// Pass the result to [`report_branch_cleanup`] so a kept branch is visible in
+/// the task's log rather than only in the app log file.
+pub fn cleanup_task_branch(
+    task: &tasks::Task,
+    working_dir: &str,
+    project: &projects::Project,
+) -> BranchCleanup {
     // Always clean up worktree regardless of other settings
     cleanup_task_worktree(task.id, working_dir);
 
     if project.auto_branch.unwrap_or(1) == 0 {
-        return;
+        return BranchCleanup::Skipped;
     }
     // Don't delete branch if auto_pr is on — PR may still be open
     if project.auto_pr.unwrap_or(0) == 1 {
-        return;
+        return BranchCleanup::Skipped;
     }
     let branch = match task.branch_name.as_deref() {
         Some(b) if !b.is_empty() => b,
-        _ => return,
+        _ => return BranchCleanup::Skipped,
     };
     let base = project.pr_base_branch.as_deref().unwrap_or("main");
     if branch == base {
-        return;
+        return BranchCleanup::Skipped;
     }
 
     let git = |args: &[&str]| {
@@ -515,13 +556,62 @@ pub fn cleanup_task_branch(task: &tasks::Task, working_dir: &str, project: &proj
         cmd.output().ok();
     };
 
-    // Delete local branch (worktree already removed so branch is free)
+    // A task branch arrives here unmerged whenever neither auto_pr nor auto_push
+    // is on — the shipped default — because nothing in the task lifecycle merges
+    // it into the base branch. Deleting it then strands every commit the task
+    // made: the worktree is already gone, so the commits become unreachable and
+    // the next `git gc` collects them.
+    if !branch_is_merged_into(branch, base, working_dir) {
+        log::warn!(
+            "Keeping branch {} for task {}: its commits are not reachable from {}",
+            branch,
+            task.id,
+            base
+        );
+        return BranchCleanup::KeptUnmerged {
+            branch: branch.to_string(),
+            base: base.to_string(),
+        };
+    }
+
+    // Reachability from `base` is established above, so these commits outlive the
+    // branch. `-D` rather than `-d` because `-d` measures merged-ness against
+    // whatever HEAD happens to be, not against the base branch.
     git(&["branch", "-D", branch]);
     // Delete remote branch (best-effort, only if auto_push is on)
     if project.auto_push.unwrap_or(0) == 1 {
         git(&["push", "origin", "--delete", branch]);
     }
     log::info!("Cleaned up branch {} for task {}", branch, task.id);
+    BranchCleanup::Deleted
+}
+
+/// Record a kept branch in the task's own log.
+///
+/// `log::warn!` reaches the app log file, stdout and the webview console — none
+/// of which the agent that produced the commits can see, and none of which the
+/// user is likely to be looking at. The task log is where they would find out
+/// their work is still sitting on a branch.
+pub fn report_branch_cleanup(
+    outcome: BranchCleanup,
+    task_id: i64,
+    db: &DbPool,
+    app: &AppHandle,
+) {
+    if let BranchCleanup::KeptUnmerged { branch, base } = outcome {
+        let msg = format!(
+            "Kept branch {} — its commits are not on {} yet. Merge or push it before deleting.",
+            branch, base
+        );
+        // 'info' rather than 'warning': the task_logs CHECK constraint has no
+        // warning level, and nothing here failed.
+        tasks::add_log(db, task_id, &msg, "info", None);
+        app.emit(
+            "task:log",
+            &serde_json::json!({"taskId": task_id, "message": msg, "logType": "info"}),
+        )
+        .ok();
+    }
 }
 
 /// Public wrapper for auto_create_pr (called from commands/tasks.rs on manual done transition)
@@ -1265,7 +1355,8 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
-                        cleanup_task_branch(&after_pr, project_working_dir, &proj);
+                        let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
+                        report_branch_cleanup(cleanup, task_id, db, app);
 
                         if proj.github_sync_enabled.unwrap_or(0) == 1 {
                             if let Some(issue_num) = done_task.github_issue_number {
@@ -1985,7 +2076,9 @@ After all checks, you MUST output this exact JSON block as your final output:
                                 // Cleanup worktree + feature branch using project root dir
                                 let after_pr =
                                     tasks::get_by_id(&db, task_id).unwrap_or(done_task.clone());
-                                cleanup_task_branch(&after_pr, &project_working_dir, &proj);
+                                let cleanup =
+                                    cleanup_task_branch(&after_pr, &project_working_dir, &proj);
+                                report_branch_cleanup(cleanup, task_id, &db, &app);
 
                                 // Auto-close linked GitHub issue
                                 if proj.github_sync_enabled.unwrap_or(0) == 1 {
@@ -2253,4 +2346,194 @@ fn extract_test_report(text: &str) -> Option<serde_json::Value> {
         i += 1;
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn git(args: &[&str], dir: &Path) -> bool {
+        let mut cmd = crate::child_env::command("git");
+        cmd.args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    /// Build a throwaway repo with a `main` branch holding one commit. `suffix`
+    /// keeps concurrently running tests out of each other's directories.
+    fn repo(suffix: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "cb-runner-branch-{}-{}",
+            std::process::id(),
+            suffix
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(git(&["init", "--quiet"], &root));
+        // A repo with no committer identity cannot commit, and CI images often
+        // have no global one.
+        git(&["config", "user.email", "test@example.com"], &root);
+        git(&["config", "user.name", "Test"], &root);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        git(&["add", "."], &root);
+        assert!(git(&["commit", "--quiet", "-m", "seed"], &root));
+        // `git init` picks the default branch name from the host's config, so
+        // normalise it rather than assuming `main`.
+        git(&["branch", "-M", "main"], &root);
+        root
+    }
+
+    fn commit_on(root: &Path, branch: &str, file: &str) {
+        assert!(git(&["checkout", "--quiet", "-b", branch], root));
+        std::fs::write(root.join(file), "work\n").unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", "work"], root));
+        git(&["checkout", "--quiet", "main"], root);
+    }
+
+    #[test]
+    fn an_unmerged_branch_is_not_reachable_from_base() {
+        let root = repo("unmerged");
+        commit_on(&root, "feature/x", "x.txt");
+        let dir = root.to_string_lossy();
+
+        // This is the case that loses work: the branch holds the only copy of
+        // its commit, so cleanup must refuse to delete it.
+        assert!(!branch_is_merged_into("feature/x", "main", &dir));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_merged_branch_is_reachable_from_base() {
+        let root = repo("merged");
+        commit_on(&root, "feature/y", "y.txt");
+        let dir = root.to_string_lossy();
+        assert!(git(&["merge", "--quiet", "--no-ff", "-m", "merge", "feature/y"], &root));
+
+        assert!(branch_is_merged_into("feature/y", "main", &dir));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_branch_with_no_commits_of_its_own_is_reachable_from_base() {
+        let root = repo("no-commits");
+        assert!(git(&["branch", "feature/z"], &root));
+        let dir = root.to_string_lossy();
+
+        // Nothing was committed, so `main` already contains everything the
+        // branch points at and deleting it costs nothing.
+        assert!(branch_is_merged_into("feature/z", "main", &dir));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_base_branch_keeps_the_branch() {
+        let root = repo("missing-base");
+        commit_on(&root, "feature/w", "w.txt");
+        let dir = root.to_string_lossy();
+
+        // git exits non-zero on an unresolvable ref; that must read as "keep",
+        // never as "safe to delete".
+        assert!(!branch_is_merged_into("feature/w", "nonexistent-base", &dir));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repo_keeps_the_branch() {
+        let root = std::env::temp_dir().join(format!("cb-runner-norepo-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(!branch_is_merged_into("feature/v", "main", &root.to_string_lossy()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn branch_exists(root: &Path, branch: &str) -> bool {
+        git(
+            &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", branch)],
+            root,
+        )
+    }
+
+    /// Only `id`, `project_id` and `title` are required; serde fills the rest of
+    /// the Option fields with None.
+    fn task(id: i64, branch: &str) -> tasks::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "project_id": 1,
+            "title": "a task",
+            "branch_name": branch,
+        }))
+        .unwrap()
+    }
+
+    /// The shipped defaults: branching on, PR off, push off.
+    fn project(working_dir: &str) -> projects::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": "p",
+            "slug": "p",
+            "working_dir": working_dir,
+            "auto_branch": 1,
+            "auto_pr": 0,
+            "auto_push": 0,
+            "pr_base_branch": "main",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cleanup_keeps_an_unmerged_task_branch() {
+        let root = repo("cleanup-unmerged");
+        commit_on(&root, "feature/keep-me", "keep.txt");
+        let dir = root.to_string_lossy().to_string();
+
+        let outcome = cleanup_task_branch(&task(9001, "feature/keep-me"), &dir, &project(&dir));
+
+        assert_eq!(
+            outcome,
+            BranchCleanup::KeptUnmerged {
+                branch: "feature/keep-me".into(),
+                base: "main".into(),
+            }
+        );
+        // Under the stock defaults nothing has merged or pushed this branch, so
+        // it holds the only copy of its commit.
+        assert!(
+            branch_exists(&root, "feature/keep-me"),
+            "cleanup deleted a branch whose commits exist nowhere else"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cleanup_deletes_a_merged_task_branch() {
+        let root = repo("cleanup-merged");
+        commit_on(&root, "feature/done", "done.txt");
+        assert!(git(
+            &["merge", "--quiet", "--no-ff", "-m", "merge", "feature/done"],
+            &root
+        ));
+        let dir = root.to_string_lossy().to_string();
+
+        let outcome = cleanup_task_branch(&task(9002, "feature/done"), &dir, &project(&dir));
+
+        assert_eq!(outcome, BranchCleanup::Deleted);
+        // The commits live on main now, so tidying the branch away loses nothing.
+        assert!(
+            !branch_exists(&root, "feature/done"),
+            "cleanup left a merged branch behind"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
