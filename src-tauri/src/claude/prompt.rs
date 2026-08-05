@@ -5,12 +5,64 @@ use crate::db::snippets::Snippet;
 use crate::db::tasks::{Task, TaskRevision};
 use crate::db::templates::Template;
 
+/// A referenced document, reduced to what the prompt needs.
+pub struct ArtifactRef {
+    pub title: String,
+    pub kind: String,
+    pub path: String,
+}
+
+/// How many referenced documents to name inline before deferring to the tool.
+const MAX_LISTED_ARTIFACTS: usize = 10;
+
+/// The prompt section naming the documents a task should read and update.
+///
+/// Paths rather than content: the agent reads what it needs with its own tools,
+/// the prompt stays small whatever the documents' size, and a reference keeps
+/// working after the document is edited.
+///
+/// The guidance matters as much as the list. A referenced document lives in the
+/// store, and once its stored copy has been edited, capture never overwrites it
+/// from the repository again — so an agent that edits a repository copy instead
+/// produces a second lineage that nothing reconciles.
+pub fn artifact_section(refs: &[ArtifactRef], omitted: usize) -> String {
+    if refs.is_empty() && omitted == 0 {
+        return String::new();
+    }
+
+    let mut lines = vec![
+        "\n## Referenced Documents".to_string(),
+        "These documents are kept in Claude Board's artifact store. Read and update them \
+         at the paths below — those are the live copies. Editing a copy inside the \
+         repository instead leaves the two versions to drift apart."
+            .to_string(),
+    ];
+
+    for r in refs.iter().take(MAX_LISTED_ARTIFACTS) {
+        lines.push(format!("- **{}** ({}) → `{}`", r.title, r.kind, r.path));
+    }
+
+    // Stating the omission rather than truncating silently: a partial list that
+    // looks complete invites the agent to conclude a document does not exist.
+    let hidden = omitted + refs.len().saturating_sub(MAX_LISTED_ARTIFACTS);
+    if hidden > 0 {
+        lines.push(format!(
+            "\n{} further document(s) are not listed here. Use the `list_artifacts` \
+             tool to see them.",
+            hidden
+        ));
+    }
+
+    lines.join("\n")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
     task: &Task,
     revisions: &[TaskRevision],
     snippets: &[Snippet],
     attachments: &[Attachment],
+    artifacts: &[ArtifactRef],
     role: Option<&Role>,
     project_id: i64,
     parent_contexts: &[(String, String)],
@@ -125,6 +177,11 @@ pub fn build_prompt(
         parts.push("\nThese files are available in the `.claude-attachments/` directory relative to the working directory. Read them as needed for context.".into());
     }
 
+    let artifact_part = artifact_section(artifacts, 0);
+    if !artifact_part.is_empty() {
+        parts.push(artifact_part);
+    }
+
     parts.push("\n## Claude Board Integration".into());
     parts.push(
         "You have access to Claude Board MCP tools. Use them to manage tasks on the project board:"
@@ -206,4 +263,88 @@ pub fn build_prompt(
     parts.push("- If acceptance criteria are provided, ensure all criteria are met.".into());
 
     parts.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact_ref(title: &str, kind: &str, path: &str) -> ArtifactRef {
+        ArtifactRef {
+            title: title.into(),
+            kind: kind.into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn the_artifact_section_lists_paths_not_content() {
+        let section = artifact_section(
+            &[
+                artifact_ref("Auth plan", "plan", "/store/auth-plan-1.md"),
+                artifact_ref("Queue RFC", "rfc", "/store/queue-rfc-2.md"),
+            ],
+            0,
+        );
+
+        assert!(section.contains("/store/auth-plan-1.md"));
+        assert!(section.contains("Auth plan"));
+        assert!(section.contains("Queue RFC"));
+        // Inlining content would blow up every prompt, and most of it would be
+        // irrelevant to the task at hand.
+        assert!(!section.contains("# Auth plan\n"));
+    }
+
+    #[test]
+    fn the_section_tells_the_agent_to_update_the_given_path() {
+        let section = artifact_section(&[artifact_ref("Plan", "plan", "/store/plan-1.md")], 0);
+        // Without this, an agent edits a repository copy and the two versions
+        // drift apart with nothing reconciling them.
+        assert!(section.to_lowercase().contains("update"), "got {}", section);
+        assert!(
+            section.to_lowercase().contains("repositor"),
+            "got {}",
+            section
+        );
+    }
+
+    #[test]
+    fn nothing_referenced_produces_no_section() {
+        assert_eq!(artifact_section(&[], 0), "");
+    }
+
+    #[test]
+    fn the_section_says_how_many_it_omitted() {
+        let section = artifact_section(&[artifact_ref("One", "doc", "/store/one.md")], 14);
+        // Silent truncation reads as "this is everything", which invites the
+        // agent to conclude a document does not exist.
+        assert!(section.contains("14"), "got {}", section);
+        assert!(section.contains("list_artifacts"), "got {}", section);
+    }
+
+    #[test]
+    fn a_long_list_is_capped_and_the_remainder_counted() {
+        let refs: Vec<ArtifactRef> = (0..15)
+            .map(|i| artifact_ref(&format!("Doc {}", i), "doc", &format!("/store/{}.md", i)))
+            .collect();
+
+        let section = artifact_section(&refs, 0);
+
+        assert!(section.contains("Doc 0"));
+        assert!(!section.contains("Doc 14"), "past the cap");
+        // 15 given, 10 listed, so 5 unlisted.
+        assert!(section.contains('5'), "got {}", section);
+    }
+
+    #[test]
+    fn omitted_and_capped_counts_add_up() {
+        let refs: Vec<ArtifactRef> = (0..12)
+            .map(|i| artifact_ref(&format!("Doc {}", i), "doc", &format!("/store/{}.md", i)))
+            .collect();
+
+        // 12 given (2 past the cap) plus 8 never passed in = 10 unlisted.
+        let section = artifact_section(&refs, 8);
+
+        assert!(section.contains("10"), "got {}", section);
+    }
 }

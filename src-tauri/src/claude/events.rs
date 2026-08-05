@@ -259,20 +259,6 @@ fn handle_assistant(task_id: i64, event: &Value, db: &DbPool, app: &AppHandle, c
                     // Track file access for conflict detection
                     track_file_access(task_id, tool_name, &input, app);
 
-                    // Remember markdown writes so the files can be copied into the
-                    // artifact store before the task's worktree is removed. Reads
-                    // the raw input rather than `meta`, whose `content` is
-                    // truncated to 500 characters.
-                    if let Some(fp) = input
-                        .get("file_path")
-                        .or(input.get("path"))
-                        .and_then(|v| v.as_str())
-                    {
-                        if crate::services::artifact_store::is_markdown_write(tool_name, fp) {
-                            crate::services::artifact_store::note_markdown_write(task_id, fp);
-                        }
-                    }
-
                     if !tool_id.is_empty() {
                         ctx.active_tool_calls.lock().insert(
                             tool_id.to_string(),

@@ -185,7 +185,13 @@ pub(crate) fn update_artifact_in(
     content: &str,
 ) -> Result<StoredArtifact, String> {
     let artifact = db::artifacts::get(db, id).ok_or("Artifact not found")?;
-    let meta = artifact_store::derive_meta(&artifact.source_rel_path, content);
+    // An in-app edit changes the body, never the classification: the title and
+    // kind stay whatever they were given.
+    let meta = artifact_store::meta_for(
+        artifact.title.as_deref().unwrap_or_default(),
+        &artifact.kind,
+        content,
+    );
 
     artifact_store::write(data_dir, &artifact.stored_name, content)?;
     db::artifacts::update_content_meta(db, id, &meta).map_err(|e| e.to_string())?;
@@ -256,7 +262,7 @@ mod tests {
 
     /// Index and store a document, the way capture would.
     fn seed(e: &Env, rel: &str, content: &str) -> i64 {
-        let meta = artifact_store::derive_meta(rel, content);
+        let meta = artifact_store::meta_for("Seeded", "doc", content);
         let name = artifact_store::unique_stored_name(&e.data_dir, rel, 1_000);
         // The hash capture would have recorded, so these fixtures start
         // un-diverged.
@@ -291,12 +297,14 @@ mod tests {
         let e = env("update");
         let id = seed(&e, "docs/p.md", "# Old\n\nold body\n");
 
-        let updated = update_artifact_in(&e.db, &e.data_dir, id, "# New title\n\nnew body\n")
+        let updated = update_artifact_in(&e.db, &e.data_dir, id, "# New heading\n\nnew body\n")
             .expect("update should succeed");
 
-        assert_eq!(updated.title.as_deref(), Some("New title"));
+        // The title is the classification the agent or user gave, not something
+        // re-read out of the prose on every edit.
+        assert_eq!(updated.title.as_deref(), Some("Seeded"));
         assert!(updated.preview.contains("new body"));
-        assert_eq!(updated.size, "# New title\n\nnew body\n".len() as i64);
+        assert_eq!(updated.size, "# New heading\n\nnew body\n".len() as i64);
         let on_disk = artifact_store::read(&e.data_dir, &updated.stored_name).unwrap();
         assert!(on_disk.contains("new body"));
         assert!(!on_disk.contains("old body"));

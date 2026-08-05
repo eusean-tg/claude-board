@@ -424,49 +424,6 @@ pub fn get_task_worktree(task_id: i64) -> Option<String> {
     TASK_WORKTREES.lock().get(&task_id).cloned()
 }
 
-/// Copy the markdown files this task wrote into the artifact store.
-///
-/// **Must be called before [`cleanup_task_branch`]**, whose first act is to
-/// remove the task's worktree — the files being captured live inside it, and the
-/// worktree path itself comes from `TASK_WORKTREES`, which cleanup also clears.
-/// Placed after cleanup this silently captures nothing, and looks like it
-/// worked: a task with no markdown writes is indistinguishable from one whose
-/// files were already deleted.
-pub fn capture_task_artifacts(
-    db: &DbPool,
-    task_id: i64,
-    project_id: i64,
-    working_dir: &str,
-    app: &AppHandle,
-) {
-    let worktree = get_task_worktree(task_id).unwrap_or_default();
-    let data_dir = db::get_data_dir().to_string_lossy().to_string();
-    let stored = crate::services::artifact_store::flush_captures(
-        db,
-        task_id,
-        project_id,
-        working_dir,
-        &worktree,
-        &data_dir,
-    );
-    // An agent given a referenced artifact's store path writes to it directly,
-    // which is not a capture — the path sits outside the working directory. The
-    // file changes while the index keeps the old title, preview and size, so the
-    // index is reconciled with disk after every completion.
-    let refreshed = crate::services::artifact_store::refresh_from_disk(db, project_id, &data_dir);
-
-    // The Artifacts tab only reloads on mount, on a project change, or when the
-    // user presses Refresh. Without this a document an agent just rewrote looks
-    // untouched until they think to reload.
-    if stored > 0 || refreshed > 0 {
-        app.emit(
-            "artifacts:changed",
-            &serde_json::json!({"projectId": project_id, "stored": stored, "refreshed": refreshed}),
-        )
-        .ok();
-    }
-}
-
 fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {
     let exec = |args: &[&str]| -> Option<String> {
         let mut cmd = crate::child_env::command("git");
@@ -1565,7 +1522,6 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
-                        capture_task_artifacts(db, task_id, project_id, project_working_dir, app);
                         let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
                         report_branch_cleanup(cleanup, task_id, db, app);
 
@@ -1704,11 +1660,30 @@ pub fn start(
     // Copy attachments to effective dir (worktree if created, else working dir)
     let (task_attachments, attach_dir) = copy_task_attachments(task_id, &effective_dir, &db);
 
+    // Referenced documents go in as absolute store paths, so the agent reads and
+    // updates the live copy rather than a repository copy that nothing syncs.
+    let referenced_artifacts = {
+        let data_dir = db::get_data_dir().to_string_lossy().to_string();
+        db::artifact_refs::artifacts_for_task(&db, task.id)
+            .into_iter()
+            .filter_map(|a| {
+                let path =
+                    crate::services::artifact_store::resolve(&data_dir, &a.stored_name).ok()?;
+                Some(crate::claude::prompt::ArtifactRef {
+                    title: a.title.clone().unwrap_or_else(|| a.source_rel_path.clone()),
+                    kind: a.kind.clone(),
+                    path: path.to_string_lossy().to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
     let prompt = build_prompt(
         &task_clone,
         &revisions,
         &enabled_snippets,
         &task_attachments,
+        &referenced_artifacts,
         role.as_ref(),
         task.project_id,
         &parent_contexts,
@@ -2287,13 +2262,6 @@ After all checks, you MUST output this exact JSON block as your final output:
                                 // Cleanup worktree + feature branch using project root dir
                                 let after_pr =
                                     tasks::get_by_id(&db, task_id).unwrap_or(done_task.clone());
-                                capture_task_artifacts(
-                                    &db,
-                                    task_id,
-                                    project_id,
-                                    &project_working_dir,
-                                    &app,
-                                );
                                 let cleanup =
                                     cleanup_task_branch(&after_pr, &project_working_dir, &proj);
                                 report_branch_cleanup(cleanup, task_id, &db, &app);
