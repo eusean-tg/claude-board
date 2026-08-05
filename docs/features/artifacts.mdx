@@ -1,10 +1,10 @@
 ---
 title: "Artifacts"
-description: "A store of the markdown your agents write — plans, RFCs, specs and notes, captured as they are written and kept independently of your repository"
+description: "A store of the documents your agents deliberately save — plans, RFCs, specs and notes — kept independently of your repository"
 icon: "folder-tree"
 ---
 
-Agents leave a paper trail: a plan before the work, an RFC to argue a decision, a spec to pin down behaviour, a note explaining the result. The **Artifacts** tab is a store of that trail. Every markdown document an agent writes is captured as it is written and kept under Claude Board's own directory, so the trail survives even when the branch it was written on does not.
+Agents leave a paper trail: a plan before the work, an RFC to argue a decision, a spec to pin down behaviour, a note explaining the result. The **Artifacts** tab is a store of that trail. An agent saves a document to it deliberately, and it is kept under Claude Board's own directory — so the trail survives even when the branch the work was done on does not.
 
 ## Opening the Artifacts tab
 
@@ -12,52 +12,48 @@ Open any project, then click the **Artifacts** tab in the top view tabs — the 
 
 The tab is a two-pane browser: the document list on the left, the selected document on the right.
 
-## What gets captured
+## What gets saved
 
-Claude Board records every tool call an agent makes, including the file each `Write`, `Edit`, `MultiEdit` and `NotebookEdit` touched. When one of those writes a `.md` or `.mdx` file inside the project, the document is copied into the store when the task completes.
+An agent saves a document by calling the **save_artifact** tool with a title, a kind, tags and the content. Nothing is inferred: the document is an artifact because the agent decided it was one, and its title is the title the agent gave it.
 
-That means the store holds what agents actually produced. Files you wrote by hand, vendored documentation, and the repository's own `README.md` are not artifacts and do not appear.
+That means the store holds what agents meant to record. Files that belong to the codebase — source, configuration, docs-site pages, a README — are written to the repository as normal and never appear here.
 
-| Rule | Behaviour |
-|------|-----------|
-| Extensions | `.md` and `.mdx` only |
-| Location | Inside the project's working directory. A document written to a temp directory or elsewhere outside the project is not captured |
-| Identity | One artifact per source document. A document edited by three tasks is one artifact, not three |
-| Timing | Captured when the task completes, before its worktree is removed |
+| Given by the agent | Derived |
+|---|---|
+| Title, kind, tags | Preview, size, filename |
 
-Agents run in a per-task git worktree that is deleted once the task finishes, so a document is copied out before that happens. This is why an artifact outlives the task, the branch and the worktree that produced it.
+The prompt for every task explains this, so an agent producing a plan or a set of research notes saves it without being asked.
 
 ### Where documents are stored
 
-Under Claude Board's data directory, beside the database rather than inside it — `~/.claudeboard/artifacts` for a data directory of `~/.claudeboard/data`. Filenames are readable: a kebab-case version of the document's own name plus the Unix second it was first captured.
+Under Claude Board's data directory, beside the database rather than inside it — `~/.claudeboard/artifacts` for a data directory of `~/.claudeboard/data`. Filenames come from the title plus the Unix second it was saved.
 
 ```
-~/.claudeboard/artifacts/auth-plan-1754400000.md
+~/.claudeboard/artifacts/auth-rollout-plan-1754400000.md
 ```
 
 A readable path matters because artifacts are meant to be referenced. An agent handed that path can read the document itself, which keeps prompts small and means a reference still resolves after the document is edited. A document keeps its filename for its whole life for the same reason.
 
+### Referencing a document from a task
+
+Open a task, go to **Documents**, and pick the documents it should read. Referenced documents are listed in that task's prompt by absolute path, with instructions to read and update them there.
+
+For documents every task should know about, set a **Shared Document Tag** in project settings — `context`, say — and tag the documents that qualify. They are named in every task's prompt for that project. Leave it empty to share none.
+
+Beyond the handful listed inline, an agent can call **list_artifacts** to see the rest, optionally filtered by tag.
+
 ### What each row shows
 
-- **Title** — the document's first H1, or the `title:` key from its YAML front matter when there is no H1, or its filename
+- **Title** — the title the agent or you gave it
 - **Preview** — the opening body text as plain prose, with front matter, fenced code blocks, and markdown syntax stripped out
-- **Kind** — a badge derived from the document's original path
+- **Kind** — plan, RFC, spec, readme, doc or other, as classified when saved
 - **Size** and **updated time** — `12.4 KB`, `5m ago`, `2d ago`, or a date once the document is more than a week old
 
-### Kinds
+### Filtering
 
-The **kind** badge is inferred from the source path, checked from the most specific match to the least:
+Filter to a single kind with the kind tabs, to a single tag with the tag chips, and narrow further with the search box.
 
-| Kind | Matches |
-|------|---------|
-| Readme | A file named `README.md` or `README.mdx` |
-| Plans | `plan` anywhere in the path |
-| RFCs | `rfc` anywhere in the path |
-| Specs | `spec` or `design` anywhere in the path |
-| Docs | A `docs` directory anywhere in the path |
-| Other | Everything else |
-
-Filter the list to a single kind with the kind tabs, and narrow it further with the search box — search matches on name, source path, and title.
+Tags work the same way task tags do. Edit them in the detail pane; an agent can also set them when it saves a document, which is what makes the shared-tag setting useful without tagging anything by hand.
 
 ## Tracing a document back to its task
 
@@ -86,11 +82,11 @@ Deleting a task does not delete the documents it produced. The attribution clear
 </Steps>
 
 <Warning>
-  Editing and deleting affect the store only. The file the agent originally wrote is still in your repository, under version control, and is left untouched. Deleting an artifact never deletes your work — but equally, editing an artifact does not change the file in your repo.
+  The store is the only copy of an artifact. Deleting one deletes the document — there is no repository copy to fall back on, because a saved artifact was never written into the repository in the first place.
 </Warning>
 
 ## Desktop app only
 
 The Artifacts tab reads and writes files on the machine running Claude Board, which the browser cannot do. It is available in the desktop app; in the browser, the tab reports that artifacts require the desktop app.
 
-<Tip>Point your agents at a convention — plans under `plans/`, decisions under `docs/rfcs/` — and the kind badges turn the Artifacts tab into a table of contents for the project's thinking.</Tip>
+<Tip>Set a shared tag like `context` and have your agents tag the documents that describe how the project works. Every later task is then told about them without you doing anything, which turns the Artifacts tab into the project's working memory.</Tip>
