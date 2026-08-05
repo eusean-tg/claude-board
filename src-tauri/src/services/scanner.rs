@@ -11,7 +11,7 @@ const MAX_FILE_SIZE: u64 = 1_048_576; // 1 MB
 const MAX_TREE_ENTRIES: usize = 200;
 
 /// Directories always excluded regardless of .gitignore
-pub(crate) const ALWAYS_EXCLUDE_DIRS: &[&str] = &[
+const ALWAYS_EXCLUDE_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     "dist",
@@ -72,7 +72,7 @@ pub struct LanguageStats {
 
 // ─── gitignore parsing ───
 
-pub(crate) struct GitignoreRules {
+struct GitignoreRules {
     patterns: Vec<GitignorePattern>,
 }
 
@@ -83,7 +83,7 @@ struct GitignorePattern {
 }
 
 impl GitignoreRules {
-    pub(crate) fn load(working_dir: &Path) -> Self {
+    fn load(working_dir: &Path) -> Self {
         let gitignore_path = working_dir.join(".gitignore");
         let mut patterns = Vec::new();
 
@@ -112,7 +112,7 @@ impl GitignoreRules {
         Self { patterns }
     }
 
-    pub(crate) fn is_ignored(&self, rel_path: &str, is_dir: bool) -> bool {
+    fn is_ignored(&self, rel_path: &str, is_dir: bool) -> bool {
         let mut ignored = false;
         for pat in &self.patterns {
             if pat.is_dir_only && !is_dir {
@@ -127,7 +127,7 @@ impl GitignoreRules {
 }
 
 /// Simple glob matching supporting `*`, `**`, and `?`.
-pub(crate) fn glob_match(pattern: &str, path: &str) -> bool {
+fn glob_match(pattern: &str, path: &str) -> bool {
     // If pattern has no slash, match against the file/dir name only
     if !pattern.contains('/') {
         let name = path.rsplit('/').next().unwrap_or(path);

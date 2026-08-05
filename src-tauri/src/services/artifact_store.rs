@@ -488,11 +488,15 @@ mod capture_tests {
         .unwrap();
         let project_id = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO tasks (project_id,title,status) VALUES (?1,'t','in_progress')",
-            rusqlite::params![project_id],
+            // Explicit id, not autoincrement. Every test builds a fresh in-memory
+            // database, so autoincrement hands out 1 to all of them — and PENDING
+            // is process-global and keyed by task id, so tests running in parallel
+            // would share and clobber each other's pending captures.
+            "INSERT INTO tasks (id,project_id,title,status) VALUES (?1,?2,'t','in_progress')",
+            rusqlite::params![task_id, project_id],
         )
         .unwrap();
-        let real_task_id = conn.last_insert_rowid();
+        let real_task_id = task_id;
 
         Env {
             db: Arc::new(Mutex::new(conn)),

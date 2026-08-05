@@ -1,44 +1,52 @@
 ---
 title: "Artifacts"
-description: "Browse, preview, and edit every markdown file your project produces — plans, RFCs, specs, and READMEs in one list"
+description: "A store of the markdown your agents write — plans, RFCs, specs and notes, captured as they are written and kept independently of your repository"
 icon: "folder-tree"
 ---
 
-Agents leave a paper trail: a plan before the work, an RFC to argue a decision, a spec to pin down behaviour, a README to explain the result. The **Artifacts** tab collects every markdown file in the project's working directory into one browsable list, so that trail is readable without leaving the board or digging through directories.
+Agents leave a paper trail: a plan before the work, an RFC to argue a decision, a spec to pin down behaviour, a note explaining the result. The **Artifacts** tab is a store of that trail. Every markdown document an agent writes is captured as it is written and kept under Claude Board's own directory, so the trail survives even when the branch it was written on does not.
 
 ## Opening the Artifacts tab
 
 Open any project, then click the **Artifacts** tab in the top view tabs — the same row that holds Board, Roadmap, and Terminal.
 
-The tab is a two-pane browser: the file list on the left, the selected file on the right.
+The tab is a two-pane browser: the document list on the left, the selected document on the right.
 
-## How files are discovered
+## What gets captured
 
-Each time the tab loads, Claude Board walks the project's working directory and collects the markdown it finds:
+Claude Board records every tool call an agent makes, including the file each `Write`, `Edit`, `MultiEdit` and `NotebookEdit` touched. When one of those writes a `.md` or `.mdx` file inside the project, the document is copied into the store when the task completes.
+
+That means the store holds what agents actually produced. Files you wrote by hand, vendored documentation, and the repository's own `README.md` are not artifacts and do not appear.
 
 | Rule | Behaviour |
 |------|-----------|
 | Extensions | `.md` and `.mdx` only |
-| `.gitignore` | Patterns in the working directory's `.gitignore` are honoured — ignored files stay out of the list |
-| Excluded directories | `node_modules`, `.git`, `dist`, `build`, `.next`, `target`, `__pycache__`, `.venv`, `vendor`, and `.cache` are skipped regardless of `.gitignore` |
-| Depth | The walk descends at most 12 directory levels |
-| File size | Files larger than 1 MB (1,048,576 bytes) are skipped |
-| List size | The list holds up to 1,000 files, most recently modified first |
+| Location | Inside the project's working directory. A document written to a temp directory or elsewhere outside the project is not captured |
+| Identity | One artifact per source document. A document edited by three tasks is one artifact, not three |
+| Timing | Captured when the task completes, before its worktree is removed |
 
-Symlinked directories are not followed, so a link pointing back up the tree cannot produce duplicate or out-of-project entries.
+Agents run in a per-task git worktree that is deleted once the task finishes, so a document is copied out before that happens. This is why an artifact outlives the task, the branch and the worktree that produced it.
+
+### Where documents are stored
+
+Under Claude Board's data directory, beside the database rather than inside it — `~/.claudeboard/artifacts` for a data directory of `~/.claudeboard/data`. Filenames are readable: a kebab-case version of the document's own name plus the Unix second it was first captured.
+
+```
+~/.claudeboard/artifacts/auth-plan-1754400000.md
+```
+
+A readable path matters because artifacts are meant to be referenced. An agent handed that path can read the document itself, which keeps prompts small and means a reference still resolves after the document is edited. A document keeps its filename for its whole life for the same reason.
 
 ### What each row shows
 
-- **Title** — the file's first H1, or the `title:` key from its YAML front matter when there is no H1, or the filename
+- **Title** — the document's first H1, or the `title:` key from its YAML front matter when there is no H1, or its filename
 - **Preview** — the opening body text as plain prose, with front matter, fenced code blocks, and markdown syntax stripped out
-- **Kind** — a badge derived from the file's path
-- **Size** and **modified time** — `12.4 KB`, `5m ago`, `2d ago`, or a date once the file is more than a week old
-
-Rows are grouped by directory, with files at the working directory root first and the remaining directories in alphabetical order.
+- **Kind** — a badge derived from the document's original path
+- **Size** and **updated time** — `12.4 KB`, `5m ago`, `2d ago`, or a date once the document is more than a week old
 
 ### Kinds
 
-The **kind** badge is inferred from the path, checked from the most specific match to the least:
+The **kind** badge is inferred from the source path, checked from the most specific match to the least:
 
 | Kind | Matches |
 |------|---------|
@@ -49,42 +57,40 @@ The **kind** badge is inferred from the path, checked from the most specific mat
 | Docs | A `docs` directory anywhere in the path |
 | Other | Everything else |
 
-Filter the list to a single kind with the kind tabs, and narrow it further with the search box — search matches on filename, relative path, and title.
+Filter the list to a single kind with the kind tabs, and narrow it further with the search box — search matches on name, source path, and title.
 
-## Tracing a file back to the task that wrote it
+## Tracing a document back to its task
 
-Claude Board records every tool call an agent makes, including the file each `Write` and `Edit` touched. An artifact is linked to a task by matching its path against those recorded calls, so a file carries a **Created by** line naming the tasks that wrote it. Click through to open that task and read the prompt, the log, and the diff behind the file.
+Each artifact records the task that first created it and the task that most recently wrote it. Click through to open that task and read the prompt, the log, and the diff behind the document.
 
-Files you wrote by hand, or that predate the board, simply have no linked task.
+Deleting a task does not delete the documents it produced. The attribution clears; the artifact stays.
 
-## Working with a file
+## Working with a document
 
 <Steps>
   <Step title="Preview" icon="eye">
-    Select a row to render the file as formatted markdown in the right pane.
+    Select a row to render the document as formatted markdown in the right pane.
   </Step>
   <Step title="Edit and save" icon="pen">
-    Click **Edit** to switch the pane to a plain-text editor. **Save** writes the file back in place; an **Unsaved changes** marker tracks edits you have not committed yet.
+    Click **Edit** to switch the pane to a plain-text editor. **Save** rewrites the stored copy; an **Unsaved changes** marker tracks edits you have not committed yet.
   </Step>
   <Step title="Reveal in file manager" icon="folder-open">
-    Open the file's directory in Finder, File Explorer, or your Linux file manager, with the file selected.
+    Open the store directory in Finder, File Explorer, or your Linux file manager, with the document selected.
   </Step>
   <Step title="Copy path" icon="clipboard">
-    Copy the file's path relative to the working directory — the form to paste into a task description or a prompt.
+    Copy the document's absolute path — the form to hand an agent so it can read the document itself.
   </Step>
-  <Step title="Jump to the authoring task" icon="arrow-right">
-    Open the task whose `Write` or `Edit` call produced the file.
+  <Step title="Delete" icon="trash">
+    Remove the document from the store.
   </Step>
 </Steps>
 
-Saving overwrites a file that already exists; the Artifacts tab does not create new files. Ask an agent to write the file, or create it yourself, and it appears in the list on the next refresh.
-
-<Info>
-  Editing is confined to markdown files inside the project's working directory. Absolute paths, and paths that climb out of the working directory with `..` or through a symlink, are refused.
-</Info>
+<Warning>
+  Editing and deleting affect the store only. The file the agent originally wrote is still in your repository, under version control, and is left untouched. Deleting an artifact never deletes your work — but equally, editing an artifact does not change the file in your repo.
+</Warning>
 
 ## Desktop app only
 
 The Artifacts tab reads and writes files on the machine running Claude Board, which the browser cannot do. It is available in the desktop app; in the browser, the tab reports that artifacts require the desktop app.
 
-<Tip>Point your agents at a convention — plans under `plans/`, decisions under `docs/rfcs/` — and the kind badges and directory grouping turn the Artifacts tab into a table of contents for the project's thinking.</Tip>
+<Tip>Point your agents at a convention — plans under `plans/`, decisions under `docs/rfcs/` — and the kind badges turn the Artifacts tab into a table of contents for the project's thinking.</Tip>
