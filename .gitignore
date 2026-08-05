@@ -38,3 +38,7 @@ scripts/
 # They only feed editor validation of capabilities/*.json; nothing reads them at
 # runtime and the build recreates whatever is missing.
 src-tauri/gen/schemas/
+
+# pnpm is the package manager; a stray package-lock.json means npm was used
+# by mistake and the two lockfiles will drift.
+package-lock.json

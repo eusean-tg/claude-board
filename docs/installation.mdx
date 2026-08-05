@@ -58,25 +58,26 @@ Building from source requires both **Rust** and **Node.js** toolchains.
 |------|---------|---------|
 | [Rust](https://rustup.rs/) | Stable | Tauri v2 backend |
 | [Node.js](https://nodejs.org) | >= 18.0.0 | React frontend & build tools |
+| [pnpm](https://pnpm.io) | Pinned in `package.json` | Package manager — `corepack enable pnpm` |
 | Platform deps | Latest | [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) |
 
 ### Steps
 
 ```bash
-git clone https://github.com/bahri-hirfanoglu/claude-board.git
+git clone https://github.com/eusean-tg/claude-board.git
 cd claude-board
-npm install
-npx tauri dev
+pnpm run setup
+pnpm exec tauri dev
 ```
 
-`npx tauri dev` builds the Rust backend, starts the Vite dev server for the React frontend, and opens the app window with hot-reload enabled.
+`pnpm run setup` installs both the root and `client/` dependency trees. `pnpm exec tauri dev` builds the Rust backend, starts the Vite dev server for the React frontend, and opens the app window with hot-reload enabled.
 
 ## Production Build
 
 To produce a distributable installer:
 
 ```bash
-npx tauri build
+pnpm exec tauri build
 ```
 
 The output is written to `src-tauri/target/release/bundle/` and includes platform-specific installers.

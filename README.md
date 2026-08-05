@@ -96,22 +96,22 @@ See the [Documentation](https://docs.claboard.dev) for detailed guides.
 
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable toolchain)
 - [Node.js](https://nodejs.org) >= 18.0.0
+- [pnpm](https://pnpm.io) — `corepack enable pnpm` uses the version pinned in `package.json`
 - AI coding CLI installed and authenticated
 
 ### Install from Source
 
 ```bash
-git clone https://github.com/bahri-hirfanoglu/claude-board.git
+git clone https://github.com/eusean-tg/claude-board.git
 cd claude-board
-npm install
-cd client && npm install && cd ..
-npx tauri dev
+pnpm run setup
+pnpm exec tauri dev
 ```
 
 ### Build Desktop Installers
 
 ```bash
-npx tauri build
+pnpm exec tauri build
 ```
 
 Built artifacts are saved to `src-tauri/target/release/bundle/`.
