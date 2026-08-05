@@ -140,19 +140,24 @@ pub fn get(db: &DbPool, id: i64) -> Option<StoredArtifact> {
     .ok()
 }
 
-/// Attach the on-disk filename to an indexed artifact.
+/// The artifact describing a given source document, if one is indexed.
 ///
-/// Split from `insert_or_replace` because the name is derived from the row id,
-/// so the row has to exist first. `insert_or_replace` deliberately leaves
-/// `stored_name` alone on the conflict path, which is what lets a re-captured
-/// document keep the filename existing references already point at.
-pub fn set_stored_name(db: &DbPool, id: i64, stored_name: &str) -> Result<(), AppError> {
+/// Capture looks this up before naming a file: a document that already has an
+/// artifact keeps its existing filename, so a path already handed to an agent
+/// stays valid across re-captures. `insert_or_replace` leaves `stored_name`
+/// alone on the conflict path for the same reason.
+pub fn find_by_source(
+    db: &DbPool,
+    project_id: i64,
+    source_rel_path: &str,
+) -> Option<StoredArtifact> {
     let conn = db.lock();
-    conn.execute(
-        "UPDATE artifacts SET stored_name=?1 WHERE id=?2",
-        params![stored_name, id],
-    )?;
-    Ok(())
+    conn.query_row(
+        "SELECT * FROM artifacts WHERE project_id=?1 AND source_rel_path=?2",
+        params![project_id, source_rel_path],
+        row_to_artifact,
+    )
+    .ok()
 }
 
 /// Refresh the metadata derived from a document's content, after an in-app edit.
