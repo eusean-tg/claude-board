@@ -26,10 +26,19 @@ vi.mock('../../../lib/api', () => ({
 }));
 
 let IS_TAURI = true;
+// Captures the registered handler so a test can fire the event itself.
+let artifactListeners = [];
+const tauriListen = vi.fn((event, cb) => {
+  artifactListeners.push({ event, cb });
+  return () => {
+    artifactListeners = artifactListeners.filter((l) => l.cb !== cb);
+  };
+});
 vi.mock('../../../lib/tauriEvents', () => ({
   get IS_TAURI() {
     return IS_TAURI;
   },
+  tauriListen: (event, cb) => tauriListen(event, cb),
 }));
 
 vi.mock('../../../i18n/I18nProvider', () => ({
@@ -72,6 +81,7 @@ let ArtifactsView;
 describe('ArtifactsView render states', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    artifactListeners = [];
     IS_TAURI = true;
     ({ default: ArtifactsView } = await import('../ArtifactsView'));
   });
@@ -103,6 +113,35 @@ describe('ArtifactsView render states', () => {
     await waitFor(() => expect(screen.getByText('Hello')).toBeTruthy());
     // Keyed on the artifact id, not a path.
     expect(getArtifact).toHaveBeenCalledWith(11);
+  });
+
+  it('reloads when a task reports artifact changes', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
+
+    const listener = artifactListeners.find((l) => l.event === 'artifacts:changed');
+    expect(listener).toBeTruthy();
+
+    // A completing task rewrote a document an agent was pointed at; the list has
+    // to pick that up without the user pressing Refresh.
+    listArtifacts.mockResolvedValue([{ ...ARTIFACTS[0], title: 'Updated by an agent' }]);
+    listener.cb({ projectId: 1 });
+
+    await waitFor(() => expect(screen.getByText('Updated by an agent')).toBeTruthy());
+  });
+
+  it('ignores artifact changes from another project', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+
+    const listener = artifactListeners.find((l) => l.event === 'artifacts:changed');
+    listener.cb({ projectId: 999 });
+
+    // Still one call: another project's completion must not refetch this list.
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
   });
 
   it('groups rows by kind rather than by directory', async () => {

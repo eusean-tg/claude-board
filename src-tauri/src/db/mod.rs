@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod artifact_refs;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;

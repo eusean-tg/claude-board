@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import MDEditor from '@uiw/react-md-editor';
 import { api, notifyError } from '../../lib/api';
-import { IS_TAURI } from '../../lib/tauriEvents';
+import { IS_TAURI, tauriListen } from '../../lib/tauriEvents';
 import { useTranslation } from '../../i18n/I18nProvider';
 import Spinner from '../../components/Spinner';
 import EmptyState from '../../components/EmptyState';
@@ -85,6 +85,18 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
     setEditing(false);
     loadArtifacts();
   }, [loadArtifacts]);
+
+  // A completing task can capture new documents or rewrite ones an agent was
+  // pointed at. Without this the list only changes on mount, on a project
+  // switch, or when the user thinks to press Refresh.
+  useEffect(
+    () =>
+      tauriListen('artifacts:changed', (payload) => {
+        if (payload?.projectId && payload.projectId !== projectId) return;
+        loadArtifacts();
+      }),
+    [projectId, loadArtifacts],
+  );
 
   const selectArtifact = useCallback(async (artifact) => {
     setSelectedId(artifact.id);

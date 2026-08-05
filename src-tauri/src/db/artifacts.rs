@@ -43,7 +43,7 @@ pub struct DerivedMeta {
     pub size: i64,
 }
 
-fn row_to_artifact(row: &Row) -> rusqlite::Result<StoredArtifact> {
+pub(crate) fn row_to_artifact(row: &Row) -> rusqlite::Result<StoredArtifact> {
     Ok(StoredArtifact {
         id: row.get("id")?,
         project_id: row.get("project_id")?,

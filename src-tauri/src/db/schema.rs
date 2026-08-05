@@ -224,6 +224,24 @@ pub fn create_tables(conn: &Connection) {
             FOREIGN KEY (last_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
             UNIQUE(project_id, source_rel_path)
         );
+
+        CREATE TABLE IF NOT EXISTS task_artifact_refs (
+            task_id INTEGER NOT NULL,
+            artifact_id INTEGER NOT NULL,
+            -- What the reference is for: reading context, tracking progress, or
+            -- the subject of a blocker. Open-ended on purpose; a new role needs
+            -- no migration.
+            role TEXT NOT NULL DEFAULT 'reference',
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            -- role is part of the key, so one task can both read a document for
+            -- context and track progress against it.
+            PRIMARY KEY (task_id, artifact_id, role),
+            -- CASCADE on both sides, unlike the authorship columns above: a
+            -- reference is a statement about a pair, so it stops meaning anything
+            -- when either end goes. Authorship is a historical fact and survives.
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -248,6 +266,7 @@ pub fn create_tables(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_task_deps_task ON task_dependencies(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_deps_parent ON task_dependencies(depends_on_id)",
         "CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_artifact_refs_artifact ON task_artifact_refs(artifact_id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_key_unique ON tasks(task_key) WHERE task_key != ''",
         "CREATE INDEX IF NOT EXISTS idx_scans_project ON scans(project_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_task_logs_task_type ON task_logs(task_id, log_type)",

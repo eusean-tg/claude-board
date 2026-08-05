@@ -432,10 +432,16 @@ pub fn get_task_worktree(task_id: i64) -> Option<String> {
 /// Placed after cleanup this silently captures nothing, and looks like it
 /// worked: a task with no markdown writes is indistinguishable from one whose
 /// files were already deleted.
-pub fn capture_task_artifacts(db: &DbPool, task_id: i64, project_id: i64, working_dir: &str) {
+pub fn capture_task_artifacts(
+    db: &DbPool,
+    task_id: i64,
+    project_id: i64,
+    working_dir: &str,
+    app: &AppHandle,
+) {
     let worktree = get_task_worktree(task_id).unwrap_or_default();
     let data_dir = db::get_data_dir().to_string_lossy().to_string();
-    crate::services::artifact_store::flush_captures(
+    let stored = crate::services::artifact_store::flush_captures(
         db,
         task_id,
         project_id,
@@ -447,7 +453,18 @@ pub fn capture_task_artifacts(db: &DbPool, task_id: i64, project_id: i64, workin
     // which is not a capture — the path sits outside the working directory. The
     // file changes while the index keeps the old title, preview and size, so the
     // index is reconciled with disk after every completion.
-    crate::services::artifact_store::refresh_from_disk(db, project_id, &data_dir);
+    let refreshed = crate::services::artifact_store::refresh_from_disk(db, project_id, &data_dir);
+
+    // The Artifacts tab only reloads on mount, on a project change, or when the
+    // user presses Refresh. Without this a document an agent just rewrote looks
+    // untouched until they think to reload.
+    if stored > 0 || refreshed > 0 {
+        app.emit(
+            "artifacts:changed",
+            &serde_json::json!({"projectId": project_id, "stored": stored, "refreshed": refreshed}),
+        )
+        .ok();
+    }
 }
 
 fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {
@@ -1548,7 +1565,7 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
-                        capture_task_artifacts(db, task_id, project_id, project_working_dir);
+                        capture_task_artifacts(db, task_id, project_id, project_working_dir, app);
                         let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
                         report_branch_cleanup(cleanup, task_id, db, app);
 
@@ -2275,6 +2292,7 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     task_id,
                                     project_id,
                                     &project_working_dir,
+                                    &app,
                                 );
                                 let cleanup =
                                     cleanup_task_branch(&after_pr, &project_working_dir, &proj);

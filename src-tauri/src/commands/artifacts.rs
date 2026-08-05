@@ -72,6 +72,33 @@ pub fn delete_artifact(id: i64) -> Result<(), String> {
     delete_artifact_in(&db, &data_dir(), id)
 }
 
+/// Relate a task to a document it should read or track progress against.
+#[tauri::command]
+pub fn add_artifact_ref(
+    task_id: i64,
+    artifact_id: i64,
+    role: Option<String>,
+) -> Result<Vec<StoredArtifact>, String> {
+    let db = db::get_db();
+    let role = role.unwrap_or_else(|| db::artifact_refs::ROLE_REFERENCE.to_string());
+    db::artifact_refs::add_ref(&db, task_id, artifact_id, &role).map_err(|e| e.to_string())?;
+    Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
+}
+
+#[tauri::command]
+pub fn remove_artifact_ref(task_id: i64, artifact_id: i64) -> Result<Vec<StoredArtifact>, String> {
+    let db = db::get_db();
+    db::artifact_refs::remove_ref(&db, task_id, artifact_id).map_err(|e| e.to_string())?;
+    Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
+}
+
+/// The documents a task references.
+#[tauri::command]
+pub fn task_artifacts(task_id: i64) -> Result<Vec<StoredArtifact>, String> {
+    let db = db::get_db();
+    Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
+}
+
 /// Acknowledge that the repository has a newer version of this document.
 ///
 /// Only clears the flag. The stored copy is untouched, which is the point: the

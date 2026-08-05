@@ -277,7 +277,7 @@ fn execute_done_side_effects(db: &crate::db::DbPool, app: &AppHandle, id: i64, t
         runner::auto_create_pr_public(&fresh_task, &pr_dir, &project, db, app);
         let after_pr = tq::get_by_id(db, id).unwrap_or(fresh_task.clone());
         // Before cleanup: it removes the worktree these files live in.
-        runner::capture_task_artifacts(db, id, task.project_id, &project.working_dir);
+        runner::capture_task_artifacts(db, id, task.project_id, &project.working_dir, app);
         // Cleanup uses project root (manages worktrees and branches)
         let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project);
         runner::report_branch_cleanup(cleanup, id, db, app);
