@@ -461,6 +461,11 @@ pub fn run() {
             commands::models::reset_model,
             commands::models::refresh_models,
             commands::models::models_synced_at,
+            // Artifacts
+            commands::artifacts::list_artifacts,
+            commands::artifacts::get_artifact,
+            commands::artifacts::save_artifact,
+            commands::artifacts::reveal_artifact,
         ])
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
