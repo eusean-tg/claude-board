@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use parking_lot::Mutex;
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
@@ -52,7 +52,7 @@ pub fn start_planning(
 
     std::thread::spawn(move || {
         log::info!("Planning: spawning claude in {}", working_dir);
-        let mut cmd = Command::new("claude");
+        let mut cmd = crate::child_env::claude_command();
         cmd.args(&args)
             .current_dir(&working_dir)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
