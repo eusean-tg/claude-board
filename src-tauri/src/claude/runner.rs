@@ -424,6 +424,27 @@ pub fn get_task_worktree(task_id: i64) -> Option<String> {
     TASK_WORKTREES.lock().get(&task_id).cloned()
 }
 
+/// Copy the markdown files this task wrote into the artifact store.
+///
+/// **Must be called before [`cleanup_task_branch`]**, whose first act is to
+/// remove the task's worktree — the files being captured live inside it, and the
+/// worktree path itself comes from `TASK_WORKTREES`, which cleanup also clears.
+/// Placed after cleanup this silently captures nothing, and looks like it
+/// worked: a task with no markdown writes is indistinguishable from one whose
+/// files were already deleted.
+pub fn capture_task_artifacts(db: &DbPool, task_id: i64, project_id: i64, working_dir: &str) {
+    let worktree = get_task_worktree(task_id).unwrap_or_default();
+    let data_dir = db::get_data_dir().to_string_lossy().to_string();
+    crate::services::artifact_store::flush_captures(
+        db,
+        task_id,
+        project_id,
+        working_dir,
+        &worktree,
+        &data_dir,
+    );
+}
+
 fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {
     let exec = |args: &[&str]| -> Option<String> {
         let mut cmd = crate::child_env::command("git");
@@ -1522,6 +1543,7 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
+                        capture_task_artifacts(db, task_id, project_id, project_working_dir);
                         let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
                         report_branch_cleanup(cleanup, task_id, db, app);
 
@@ -2243,6 +2265,12 @@ After all checks, you MUST output this exact JSON block as your final output:
                                 // Cleanup worktree + feature branch using project root dir
                                 let after_pr =
                                     tasks::get_by_id(&db, task_id).unwrap_or(done_task.clone());
+                                capture_task_artifacts(
+                                    &db,
+                                    task_id,
+                                    project_id,
+                                    &project_working_dir,
+                                );
                                 let cleanup =
                                     cleanup_task_branch(&after_pr, &project_working_dir, &proj);
                                 report_branch_cleanup(cleanup, task_id, &db, &app);

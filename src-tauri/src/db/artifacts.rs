@@ -140,6 +140,21 @@ pub fn get(db: &DbPool, id: i64) -> Option<StoredArtifact> {
     .ok()
 }
 
+/// Attach the on-disk filename to an indexed artifact.
+///
+/// Split from `insert_or_replace` because the name is derived from the row id,
+/// so the row has to exist first. `insert_or_replace` deliberately leaves
+/// `stored_name` alone on the conflict path, which is what lets a re-captured
+/// document keep the filename existing references already point at.
+pub fn set_stored_name(db: &DbPool, id: i64, stored_name: &str) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE artifacts SET stored_name=?1 WHERE id=?2",
+        params![stored_name, id],
+    )?;
+    Ok(())
+}
+
 /// Refresh the metadata derived from a document's content, after an in-app edit.
 pub fn update_content_meta(db: &DbPool, id: i64, meta: &DerivedMeta) -> Result<(), AppError> {
     let conn = db.lock();

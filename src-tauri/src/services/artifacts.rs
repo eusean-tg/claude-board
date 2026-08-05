@@ -254,7 +254,7 @@ pub fn write(working_dir: &str, rel_path: &str, content: &str) -> Result<(), Str
 
 /// Label an artifact by what its path says it is. Checks run from the most
 /// specific match to the least.
-fn classify(rel_path: &str) -> &'static str {
+pub(crate) fn classify(rel_path: &str) -> &'static str {
     let lower = rel_path.replace('\\', "/").to_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
 
@@ -283,7 +283,7 @@ fn classify(rel_path: &str) -> &'static str {
 /// The title is the first H1, falling back to a top-level `title:` key in YAML
 /// front matter. The preview is the leading body text with front matter, fenced
 /// code, and markdown syntax removed.
-fn title_and_preview(content: &str) -> (Option<String>, String) {
+pub(crate) fn title_and_preview(content: &str) -> (Option<String>, String) {
     let (front_matter, body) = split_front_matter(content);
 
     let mut heading_title: Option<String> = None;
