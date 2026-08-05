@@ -13,6 +13,7 @@ import {
   Github,
   Map,
   Terminal,
+  FileText,
 } from 'lucide-react';
 import Column from './Column';
 import ListView from './ListView';
@@ -25,6 +26,7 @@ import { IS_TAURI } from '../../lib/tauriEvents';
 import GitHubIssuesPanel from './GitHubIssuesPanel';
 import ErrorBoundary from '../../components/ErrorBoundary';
 const RoadmapView = lazy(() => import('../roadmap/RoadmapView'));
+const ArtifactsView = lazy(() => import('../artifacts/ArtifactsView'));
 const ProjectTerminal = lazy(() => import('../terminal/ProjectTerminal'));
 import { useTranslation } from '../../i18n/I18nProvider';
 import { parseTags } from './TagBadge';
@@ -37,6 +39,7 @@ const VIEWS = [
   { id: 'orchestration', labelKey: 'board.orchestration', icon: Workflow },
   { id: 'analytics', labelKey: 'board.analytics', icon: TrendingUp },
   { id: 'roadmap', labelKey: 'board.roadmap', icon: Map },
+  { id: 'artifacts', labelKey: 'board.artifacts', icon: FileText },
   { id: 'terminal', labelKey: 'board.terminal', icon: Terminal },
 ];
 
@@ -470,6 +473,21 @@ export default function Board({
                   onViewDetail={onViewDetail}
                   onStatusChange={onStatusChange}
                 />
+              </div>
+            </Suspense>
+          </ErrorBoundary>
+        )}
+
+        {viewMode === 'artifacts' && (
+          <ErrorBoundary>
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">Loading...</div>
+              }
+            >
+              <div className="flex-1 min-h-0 overflow-hidden">
+                {/* Unfiltered `tasks`: attribution chips must resolve even under an active model/tag filter. */}
+                <ArtifactsView projectId={projectId} project={project} tasks={tasks} onViewDetail={onViewDetail} />
               </div>
             </Suspense>
           </ErrorBoundary>
