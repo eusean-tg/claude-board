@@ -1,3 +1,4 @@
+pub mod artifact_store;
 pub mod artifacts;
 pub mod github;
 pub mod github_sync;
