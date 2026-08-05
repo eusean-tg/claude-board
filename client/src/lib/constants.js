@@ -12,7 +12,15 @@ export const COLUMNS = [
     bg: 'bg-violet-400',
     dot: 'bg-violet-400',
   },
+  { id: 'blocked', label: 'Blocked', color: 'text-orange-400', bg: 'bg-orange-400', dot: 'bg-orange-400' },
 ];
+
+// Mirrors TaskStatus in src-tauri/src/claude/state_machine.rs. Group and switch on
+// this rather than on a fresh object literal, so a new status cannot be dropped on
+// the floor by a list that was never updated.
+export const TASK_STATUSES = COLUMNS.map((c) => c.id);
+
+export const STATUS_DOT = Object.fromEntries(COLUMNS.map((c) => [c.id, c.dot]));
 
 // ─── Task types ───
 export const TASK_TYPES = ['feature', 'bugfix', 'refactor', 'docs', 'test', 'chore'];

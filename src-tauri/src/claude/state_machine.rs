@@ -18,6 +18,9 @@ pub enum TaskStatus {
     Failed,
     #[serde(rename = "awaiting_approval")]
     AwaitingApproval,
+    /// The agent raised a question it cannot proceed without an answer to.
+    #[serde(rename = "blocked")]
+    Blocked,
 }
 
 impl TaskStatus {
@@ -29,6 +32,7 @@ impl TaskStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::AwaitingApproval => "awaiting_approval",
+            Self::Blocked => "blocked",
         }
     }
 
@@ -40,6 +44,7 @@ impl TaskStatus {
             "done" => Some(Self::Done),
             "failed" => Some(Self::Failed),
             "awaiting_approval" => Some(Self::AwaitingApproval),
+            "blocked" => Some(Self::Blocked),
             _ => None,
         }
     }
@@ -103,17 +108,33 @@ pub fn is_valid_transition(from: TaskStatus, to: TaskStatus) -> bool {
         | (Failed, Backlog)         // user retries from failure
         | (Failed, InProgress)      // user directly restarts
         | (Done, Backlog)           // user reopens
-        | (Done, InProgress) // user reopens and restarts
+        | (Done, InProgress)        // user reopens and restarts
+
+        // ── Blocked on a question ──
+        // Deliberately no (Blocked, Testing) or (Blocked, Done): the agent's
+        // question is unanswered, and jumping past it skips the answer entirely.
+        | (InProgress, Blocked)     // agent raised a blocker
+        | (Blocked, InProgress)     // answered, or user unblocked
+        | (Blocked, Backlog)        // user parks it for later
+        | (Blocked, Failed) // user gives up on it
     )
 }
 
 /// Get all valid target statuses from a given status.
 pub fn valid_targets(from: TaskStatus) -> Vec<TaskStatus> {
     use TaskStatus::*;
-    [Backlog, InProgress, Testing, Done, Failed, AwaitingApproval]
-        .into_iter()
-        .filter(|to| is_valid_transition(from, *to))
-        .collect()
+    [
+        Backlog,
+        InProgress,
+        Testing,
+        Done,
+        Failed,
+        AwaitingApproval,
+        Blocked,
+    ]
+    .into_iter()
+    .filter(|to| is_valid_transition(from, *to))
+    .collect()
 }
 
 // ─── Engine Configuration ───────────────────────────────────────────────────
@@ -233,5 +254,49 @@ mod tests {
         assert!(!is_valid_transition(Done, Done));
         // Can't go from done to testing directly
         assert!(!is_valid_transition(Done, Testing));
+    }
+
+    #[test]
+    fn blocked_round_trips_through_its_serialised_name() {
+        assert_eq!(TaskStatus::from_str("blocked"), Some(TaskStatus::Blocked));
+        assert_eq!(TaskStatus::Blocked.as_str(), "blocked");
+    }
+
+    #[test]
+    fn an_in_progress_task_can_block_and_come_back() {
+        assert!(is_valid_transition(
+            TaskStatus::InProgress,
+            TaskStatus::Blocked
+        ));
+        assert!(is_valid_transition(
+            TaskStatus::Blocked,
+            TaskStatus::InProgress
+        ));
+    }
+
+    #[test]
+    fn a_blocked_task_cannot_skip_to_done_or_testing() {
+        // The question is unanswered; jumping past it defeats the feature.
+        assert!(!is_valid_transition(TaskStatus::Blocked, TaskStatus::Done));
+        assert!(!is_valid_transition(
+            TaskStatus::Blocked,
+            TaskStatus::Testing
+        ));
+    }
+
+    #[test]
+    fn blocked_is_reachable_from_the_ui() {
+        // valid_targets iterates a hardcoded array; forgetting to add Blocked there
+        // makes the status exist but be unselectable, with no error anywhere.
+        assert!(valid_targets(TaskStatus::InProgress).contains(&TaskStatus::Blocked));
+        assert!(!valid_targets(TaskStatus::Blocked).is_empty());
+    }
+
+    #[test]
+    fn a_blocked_task_expects_no_runner_and_is_not_terminal() {
+        // The agent may have exited at its deadline, so the supervisor must not
+        // treat a missing process as a crash; and the user still has a way out.
+        assert!(!TaskStatus::Blocked.expects_runner());
+        assert!(!TaskStatus::Blocked.is_terminal());
     }
 }

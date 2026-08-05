@@ -243,7 +243,18 @@ function FailEffect() {
 }
 
 // ─── Main component ───
-const STATUS_ORDER = { backlog: 0, in_progress: 1, testing: 2, awaiting_approval: 3, done: 4, failed: -1 };
+// Blocked ranks alongside in_progress: it is a pause at that stage, not progress
+// past it. Leaving it out would default to 0 and make unblocking look like an
+// advance, playing the forward effect for a task returning to where it was.
+const STATUS_ORDER = {
+  backlog: 0,
+  in_progress: 1,
+  blocked: 1,
+  testing: 2,
+  awaiting_approval: 3,
+  done: 4,
+  failed: -1,
+};
 
 export default function StatusTransitionEffect({ from, to }) {
   const [visible, setVisible] = useState(true);

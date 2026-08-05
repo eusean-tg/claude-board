@@ -20,7 +20,15 @@ import ListView from './ListView';
 const PipelineView = lazy(() => import('./PipelineView'));
 const OrchestrationView = lazy(() => import('./OrchestrationView'));
 const AnalyticsView = lazy(() => import('./AnalyticsView'));
-import { COLUMNS, MODELS, MODEL_COLORS, MODEL_DOT_COLORS, MODEL_BG_ACTIVE, getTagColor } from '../../lib/constants';
+import {
+  COLUMNS,
+  TASK_STATUSES,
+  MODELS,
+  MODEL_COLORS,
+  MODEL_DOT_COLORS,
+  MODEL_BG_ACTIVE,
+  getTagColor,
+} from '../../lib/constants';
 import { notifyError } from '../../lib/api';
 import { IS_TAURI } from '../../lib/tauriEvents';
 import GitHubIssuesPanel from './GitHubIssuesPanel';
@@ -145,7 +153,7 @@ export default function Board({
   }, [tasks, modelFilter, tagFilter]);
 
   const groupedTasks = useMemo(() => {
-    const grouped = { backlog: [], in_progress: [], testing: [], done: [], failed: [], awaiting_approval: [] };
+    const grouped = Object.fromEntries(TASK_STATUSES.map((s) => [s, []]));
     for (const t of filteredTasks) {
       const s = t.status || 'backlog';
       if (grouped[s]) grouped[s].push(t);
@@ -154,11 +162,16 @@ export default function Board({
   }, [filteredTasks]);
   const columnTasks = (colId) => groupedTasks[colId] || [];
 
-  // Only show awaiting_approval column when require_approval is enabled
-  const visibleColumns = useMemo(
-    () => COLUMNS.filter((col) => col.id !== 'awaiting_approval' || project?.require_approval),
-    [project?.require_approval],
-  );
+  const visibleColumns = useMemo(() => {
+    return COLUMNS.filter((col) => {
+      // Approval is opt-in per project, so its column only appears when asked for.
+      if (col.id === 'awaiting_approval') return !!project?.require_approval;
+      // Blocked is never opt-in — any agent can raise a question — but an
+      // always-empty column is clutter, so it appears once something is in it.
+      if (col.id === 'blocked') return groupedTasks.blocked?.length > 0;
+      return true;
+    });
+  }, [project?.require_approval, groupedTasks.blocked?.length]);
 
   return (
     <div className="h-full flex">

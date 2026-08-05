@@ -16,19 +16,20 @@ import {
   MinusSquare,
 } from 'lucide-react';
 import { formatDuration, formatTokens } from '../../lib/formatters';
-import { TYPE_COLORS, PRIORITY_LABELS, PRIORITY_COLORS, MODEL_COLORS, COLUMNS } from '../../lib/constants';
+import {
+  TYPE_COLORS,
+  PRIORITY_LABELS,
+  PRIORITY_COLORS,
+  MODEL_COLORS,
+  COLUMNS,
+  STATUS_DOT,
+  TASK_STATUSES,
+} from '../../lib/constants';
 import { useTranslation } from '../../i18n/I18nProvider';
 import { TagList } from './TagBadge';
 
 const PAGE_SIZE = 50;
 
-const STATUS_DOT = {
-  backlog: 'bg-surface-400',
-  in_progress: 'bg-amber-400',
-  testing: 'bg-claude',
-  done: 'bg-emerald-400',
-  failed: 'bg-red-400',
-};
 export default function ListView({
   tasks,
   onStatusChange,
@@ -83,9 +84,10 @@ export default function ListView({
       let av = a[sortField],
         bv = b[sortField];
       if (sortField === 'status') {
-        const order = { backlog: 0, in_progress: 1, testing: 2, done: 3 };
-        av = order[av] ?? 0;
-        bv = order[bv] ?? 0;
+        // Column order is the pipeline order. Deriving the rank from it keeps a
+        // new status from silently sorting as though it were backlog.
+        av = TASK_STATUSES.indexOf(av);
+        bv = TASK_STATUSES.indexOf(bv);
       }
       if (sortField === 'tokens') {
         av = (a.input_tokens || 0) + (a.output_tokens || 0);

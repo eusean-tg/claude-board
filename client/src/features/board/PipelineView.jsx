@@ -36,6 +36,12 @@ const STATUS_CONFIG = {
     label: 'Awaiting Approval',
   },
   failed: { color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: 'Failed' },
+  blocked: {
+    color: 'text-orange-400',
+    bg: 'bg-orange-500/10',
+    border: 'border-orange-500/30',
+    label: 'Blocked',
+  },
 };
 
 export default function PipelineView({ tasks, onStatusChange, onViewLogs, onViewDetail }) {

@@ -30,6 +30,7 @@ export default {
   'status.done': 'Done',
   'status.failed': 'Failed',
   'status.awaiting_approval': 'Awaiting Approval',
+  'status.blocked': 'Blocked',
   'status.running': 'Running',
   'status.active': 'Active',
   'status.connected': 'Connected',

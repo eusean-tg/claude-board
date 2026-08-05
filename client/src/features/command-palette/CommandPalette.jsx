@@ -17,6 +17,7 @@ import {
   Clock,
   Workflow,
   BadgeCheck,
+  HelpCircle,
 } from 'lucide-react';
 
 const CATEGORY_ICONS = {
@@ -33,6 +34,7 @@ const STATUS_ICONS = {
   done: CheckCircle2,
   failed: XCircle,
   awaiting_approval: BadgeCheck,
+  blocked: HelpCircle,
 };
 
 const STATUS_COLORS = {
@@ -42,6 +44,7 @@ const STATUS_COLORS = {
   done: 'text-emerald-400',
   failed: 'text-red-400',
   awaiting_approval: 'text-violet-400',
+  blocked: 'text-orange-400',
 };
 
 export default function CommandPalette({
