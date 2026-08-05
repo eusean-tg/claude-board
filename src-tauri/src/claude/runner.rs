@@ -502,6 +502,28 @@ fn branch_is_merged_into(branch: &str, base: &str, working_dir: &str) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Why a merge into the base branch could not be attempted or did not finish.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergeRefusal {
+    /// Uncommitted changes in the working directory. Merging would either fail
+    /// halfway or sweep the user's edits into a merge commit.
+    DirtyWorkingTree,
+    /// The checkout could not be moved to the base branch.
+    CannotCheckoutBase,
+    /// The merge produced conflicts and was aborted.
+    Conflict,
+}
+
+impl MergeRefusal {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::DirtyWorkingTree => "the working directory has uncommitted changes",
+            Self::CannotCheckoutBase => "the base branch could not be checked out",
+            Self::Conflict => "the merge conflicted and was rolled back",
+        }
+    }
+}
+
 /// What `cleanup_task_branch` did, so the caller can tell the user about it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum BranchCleanup {
@@ -510,8 +532,98 @@ pub enum BranchCleanup {
     Skipped,
     /// Branch deleted. Its commits are reachable from the base branch.
     Deleted,
+    /// Merged into the base branch and then deleted.
+    Merged { branch: String, base: String },
     /// Branch kept: deleting it would have destroyed the only copy of its commits.
     KeptUnmerged { branch: String, base: String },
+    /// Merge was requested but refused; the branch is kept and still holds the work.
+    KeptMergeRefused {
+        branch: String,
+        base: String,
+        refusal: MergeRefusal,
+    },
+}
+
+/// True when the working directory has no uncommitted changes.
+fn working_tree_is_clean(working_dir: &str) -> bool {
+    let mut cmd = crate::child_env::command("git");
+    cmd.args(["status", "--porcelain"])
+        .current_dir(working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output()
+        .map(|o| o.status.success() && o.stdout.iter().all(|b| b.is_ascii_whitespace()))
+        .unwrap_or(false)
+}
+
+fn current_branch(working_dir: &str) -> Option<String> {
+    let mut cmd = crate::child_env::command("git");
+    cmd.args(["branch", "--show-current"])
+        .current_dir(working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|b| !b.is_empty())
+}
+
+/// Merge `branch` into `base` in the project's own checkout.
+///
+/// Done here rather than in a scratch worktree because git refuses to check out
+/// a branch that is already checked out elsewhere, and `base` usually is. The
+/// checkout is moved to `base` only when it is not already there and is restored
+/// afterwards, so the branch the user left selected survives the round trip.
+///
+/// Refuses rather than forces: a dirty working directory or a conflict leaves
+/// the repository exactly as it was, and the task branch keeps the work.
+fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), MergeRefusal> {
+    let git = |args: &[&str]| -> bool {
+        let mut cmd = crate::child_env::command("git");
+        cmd.args(args)
+            .current_dir(working_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    };
+
+    // Checked before touching anything: a merge over uncommitted work either
+    // aborts partway or absorbs edits that were never meant to be committed.
+    if !working_tree_is_clean(working_dir) {
+        return Err(MergeRefusal::DirtyWorkingTree);
+    }
+
+    let started_on = current_branch(working_dir);
+    let switched = started_on.as_deref() != Some(base);
+    if switched && !git(&["checkout", "--quiet", base]) {
+        return Err(MergeRefusal::CannotCheckoutBase);
+    }
+
+    // --no-ff keeps each task's work identifiable as a unit in the history
+    // rather than collapsing it into a straight line.
+    let merged = git(&["merge", "--no-ff", "--no-edit", branch]);
+    if !merged {
+        git(&["merge", "--abort"]);
+    }
+
+    if switched {
+        if let Some(original) = started_on {
+            git(&["checkout", "--quiet", &original]);
+        }
+    }
+
+    if merged {
+        Ok(())
+    } else {
+        Err(MergeRefusal::Conflict)
+    }
 }
 
 /// Delete feature branch (local + remote) and worktree after task completion.
@@ -556,11 +668,42 @@ pub fn cleanup_task_branch(
         cmd.output().ok();
     };
 
-    // A task branch arrives here unmerged whenever neither auto_pr nor auto_push
-    // is on — the shipped default — because nothing in the task lifecycle merges
-    // it into the base branch. Deleting it then strands every commit the task
-    // made: the worktree is already gone, so the commits become unreachable and
-    // the next `git gc` collects them.
+    // With auto_merge on, this is the step that makes "done" mean "landed".
+    // Without it nothing in the task lifecycle ever moves work onto the base
+    // branch, so branches accumulate — safe, but never finished.
+    let mut merged_here = false;
+    if project.auto_merge.unwrap_or(0) == 1 && !branch_is_merged_into(branch, base, working_dir) {
+        match merge_task_branch(branch, base, working_dir) {
+            Ok(()) => {
+                merged_here = true;
+                log::info!(
+                    "Merged branch {} into {} for task {}",
+                    branch,
+                    base,
+                    task.id
+                );
+            }
+            Err(refusal) => {
+                log::warn!(
+                    "Keeping branch {} for task {}: {}",
+                    branch,
+                    task.id,
+                    refusal.reason()
+                );
+                return BranchCleanup::KeptMergeRefused {
+                    branch: branch.to_string(),
+                    base: base.to_string(),
+                    refusal,
+                };
+            }
+        }
+    }
+
+    // A task branch arrives here unmerged whenever neither auto_merge, auto_pr
+    // nor auto_push is on — the shipped default — because nothing in the task
+    // lifecycle merges it into the base branch. Deleting it then strands every
+    // commit the task made: the worktree is already gone, so the commits become
+    // unreachable and the next `git gc` collects them.
     if !branch_is_merged_into(branch, base, working_dir) {
         log::warn!(
             "Keeping branch {} for task {}: its commits are not reachable from {}",
@@ -583,30 +726,59 @@ pub fn cleanup_task_branch(
         git(&["push", "origin", "--delete", branch]);
     }
     log::info!("Cleaned up branch {} for task {}", branch, task.id);
-    BranchCleanup::Deleted
+    if merged_here {
+        BranchCleanup::Merged {
+            branch: branch.to_string(),
+            base: base.to_string(),
+        }
+    } else {
+        BranchCleanup::Deleted
+    }
 }
 
-/// Record a kept branch in the task's own log.
+/// Record what happened to the task's branch in the task's own log.
 ///
 /// `log::warn!` reaches the app log file, stdout and the webview console — none
 /// of which the agent that produced the commits can see, and none of which the
 /// user is likely to be looking at. The task log is where they would find out
 /// their work is still sitting on a branch.
 pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, app: &AppHandle) {
-    if let BranchCleanup::KeptUnmerged { branch, base } = outcome {
-        let msg = format!(
-            "Kept branch {} — its commits are not on {} yet. Merge or push it before deleting.",
-            branch, base
-        );
-        // 'info' rather than 'warning': the task_logs CHECK constraint has no
-        // warning level, and nothing here failed.
-        tasks::add_log(db, task_id, &msg, "info", None);
-        app.emit(
-            "task:log",
-            &serde_json::json!({"taskId": task_id, "message": msg, "logType": "info"}),
-        )
-        .ok();
-    }
+    let (msg, level) = match outcome {
+        BranchCleanup::Skipped | BranchCleanup::Deleted => return,
+        BranchCleanup::Merged { branch, base } => (
+            format!("Merged {} into {} and deleted the branch.", branch, base),
+            "success",
+        ),
+        BranchCleanup::KeptUnmerged { branch, base } => (
+            format!(
+                "Kept branch {} — its commits are not on {} yet. Merge or push it before deleting.",
+                branch, base
+            ),
+            // 'info' rather than 'warning': the task_logs CHECK constraint has
+            // no warning level, and nothing here failed.
+            "info",
+        ),
+        BranchCleanup::KeptMergeRefused {
+            branch,
+            base,
+            refusal,
+        } => (
+            format!(
+                "Did not merge {} into {} because {}. The branch still has the work.",
+                branch,
+                base,
+                refusal.reason()
+            ),
+            "error",
+        ),
+    };
+
+    tasks::add_log(db, task_id, &msg, level, None);
+    app.emit(
+        "task:log",
+        &serde_json::json!({"taskId": task_id, "message": msg, "logType": level}),
+    )
+    .ok();
 }
 
 /// Public wrapper for auto_create_pr (called from commands/tasks.rs on manual done transition)
@@ -2171,6 +2343,7 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     auto_branch: None,
                                     auto_pr: None,
                                     auto_push: None,
+                                    auto_merge: None,
                                     pr_base_branch: None,
                                     project_key: None,
                                     task_counter: None,
@@ -2488,6 +2661,10 @@ mod tests {
 
     /// The shipped defaults: branching on, PR off, push off.
     fn project(working_dir: &str) -> projects::Project {
+        project_with_merge(working_dir, 0)
+    }
+
+    fn project_with_merge(working_dir: &str, auto_merge: i64) -> projects::Project {
         serde_json::from_value(serde_json::json!({
             "id": 1,
             "name": "p",
@@ -2496,9 +2673,154 @@ mod tests {
             "auto_branch": 1,
             "auto_pr": 0,
             "auto_push": 0,
+            "auto_merge": auto_merge,
             "pr_base_branch": "main",
         }))
         .unwrap()
+    }
+
+    fn file_on(root: &Path, branch: &str, file: &str) -> Option<String> {
+        let mut cmd = crate::child_env::command("git");
+        cmd.args(["show", &format!("{}:{}", branch, file)])
+            .current_dir(root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        cmd.output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    }
+
+    /// Commit `content` to `file` directly on the currently checked out branch.
+    fn commit_file(root: &Path, file: &str, content: &str) {
+        std::fs::write(root.join(file), content).unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", "change"], root));
+    }
+
+    #[test]
+    fn merge_moves_the_work_onto_base() {
+        let root = repo("merge-clean");
+        commit_on(&root, "feature/m", "m.txt");
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(merge_task_branch("feature/m", "main", &dir), Ok(()));
+        assert!(file_on(&root, "main", "m.txt").is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merge_returns_to_the_branch_the_user_left_checked_out() {
+        let root = repo("merge-restore");
+        commit_on(&root, "feature/n", "n.txt");
+        // The user is sitting on some unrelated branch, not on base.
+        assert!(git(&["checkout", "--quiet", "-b", "scratch"], &root));
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(merge_task_branch("feature/n", "main", &dir), Ok(()));
+
+        // Landing work must not silently move the user off their own branch.
+        assert_eq!(current_branch(&dir).as_deref(), Some("scratch"));
+        assert!(file_on(&root, "main", "n.txt").is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merge_refuses_when_the_working_tree_is_dirty() {
+        let root = repo("merge-dirty");
+        commit_on(&root, "feature/d", "d.txt");
+        std::fs::write(root.join("seed.txt"), "uncommitted edit\n").unwrap();
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(
+            merge_task_branch("feature/d", "main", &dir),
+            Err(MergeRefusal::DirtyWorkingTree)
+        );
+        // The edit is still there and untouched by any merge machinery.
+        assert_eq!(
+            std::fs::read_to_string(root.join("seed.txt")).unwrap(),
+            "uncommitted edit\n"
+        );
+        assert!(file_on(&root, "main", "d.txt").is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merge_rolls_back_a_conflict_and_leaves_base_untouched() {
+        let root = repo("merge-conflict");
+        // Both branches change the same line, so the merge cannot succeed.
+        assert!(git(&["checkout", "--quiet", "-b", "feature/c"], &root));
+        commit_file(&root, "shared.txt", "from the task\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        commit_file(&root, "shared.txt", "from main\n");
+        let base_before = file_on(&root, "main", "shared.txt");
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(
+            merge_task_branch("feature/c", "main", &dir),
+            Err(MergeRefusal::Conflict)
+        );
+
+        // A half-finished merge left in place would strand the repo mid-conflict.
+        assert_eq!(file_on(&root, "main", "shared.txt"), base_before);
+        assert!(working_tree_is_clean(&dir));
+        assert!(branch_exists(&root, "feature/c"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cleanup_merges_then_deletes_when_auto_merge_is_on() {
+        let root = repo("cleanup-automerge");
+        commit_on(&root, "feature/land", "land.txt");
+        let dir = root.to_string_lossy().to_string();
+
+        let outcome = cleanup_task_branch(
+            &task(9003, "feature/land"),
+            &dir,
+            &project_with_merge(&dir, 1),
+        );
+
+        assert_eq!(
+            outcome,
+            BranchCleanup::Merged {
+                branch: "feature/land".into(),
+                base: "main".into(),
+            }
+        );
+        // Deleting is only safe because the merge put the commits on main first.
+        assert!(file_on(&root, "main", "land.txt").is_some());
+        assert!(!branch_exists(&root, "feature/land"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cleanup_keeps_the_branch_when_a_requested_merge_conflicts() {
+        let root = repo("cleanup-conflict");
+        assert!(git(&["checkout", "--quiet", "-b", "feature/x"], &root));
+        commit_file(&root, "shared.txt", "task side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        commit_file(&root, "shared.txt", "main side\n");
+        let dir = root.to_string_lossy().to_string();
+
+        let outcome =
+            cleanup_task_branch(&task(9004, "feature/x"), &dir, &project_with_merge(&dir, 1));
+
+        assert_eq!(
+            outcome,
+            BranchCleanup::KeptMergeRefused {
+                branch: "feature/x".into(),
+                base: "main".into(),
+                refusal: MergeRefusal::Conflict,
+            }
+        );
+        assert!(branch_exists(&root, "feature/x"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub fn create_project(
     auto_branch: Option<bool>,
     auto_pr: Option<bool>,
     auto_push: Option<bool>,
+    auto_merge: Option<bool>,
     pr_base_branch: Option<String>,
     auto_test: Option<bool>,
     test_prompt: Option<String>,
@@ -88,7 +89,11 @@ pub fn create_project(
             max_concurrent.unwrap_or(1),
         );
     }
-    if auto_branch.is_some() || auto_pr.is_some() || auto_push.is_some() || pr_base_branch.is_some()
+    if auto_branch.is_some()
+        || auto_pr.is_some()
+        || auto_push.is_some()
+        || auto_merge.is_some()
+        || pr_base_branch.is_some()
     {
         pq::update_git_settings(
             &db,
@@ -96,6 +101,7 @@ pub fn create_project(
             auto_branch.unwrap_or(true),
             auto_pr.unwrap_or(false),
             auto_push.unwrap_or(false),
+            auto_merge.unwrap_or(false),
             pr_base_branch.as_deref().unwrap_or("main"),
         );
     }
@@ -175,6 +181,7 @@ pub fn update_project(
     auto_branch: Option<bool>,
     auto_pr: Option<bool>,
     auto_push: Option<bool>,
+    auto_merge: Option<bool>,
     pr_base_branch: Option<String>,
     auto_test: Option<bool>,
     test_prompt: Option<String>,
@@ -233,7 +240,11 @@ pub fn update_project(
     if let Some(retries) = max_retries {
         pq::update_max_retries(&db, id, retries);
     }
-    if auto_branch.is_some() || auto_pr.is_some() || auto_push.is_some() || pr_base_branch.is_some()
+    if auto_branch.is_some()
+        || auto_pr.is_some()
+        || auto_push.is_some()
+        || auto_merge.is_some()
+        || pr_base_branch.is_some()
     {
         pq::update_git_settings(
             &db,
@@ -241,6 +252,7 @@ pub fn update_project(
             auto_branch.unwrap_or(project.auto_branch.unwrap_or(1) == 1),
             auto_pr.unwrap_or(project.auto_pr.unwrap_or(0) == 1),
             auto_push.unwrap_or(project.auto_push.unwrap_or(0) == 1),
+            auto_merge.unwrap_or(project.auto_merge.unwrap_or(0) == 1),
             pr_base_branch
                 .as_deref()
                 .unwrap_or(project.pr_base_branch.as_deref().unwrap_or("main")),

@@ -19,6 +19,7 @@ pub struct Project {
     pub auto_branch: Option<i64>,
     pub auto_pr: Option<i64>,
     pub auto_push: Option<i64>,
+    pub auto_merge: Option<i64>,
     pub pr_base_branch: Option<String>,
     pub project_key: Option<String>,
     pub task_counter: Option<i64>,
@@ -73,6 +74,7 @@ fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         auto_branch: row.get("auto_branch")?,
         auto_pr: row.get("auto_pr")?,
         auto_push: row.get("auto_push").ok().flatten(),
+        auto_merge: row.get("auto_merge").ok().flatten(),
         pr_base_branch: row.get("pr_base_branch")?,
         project_key: row.get("project_key")?,
         task_counter: row.get("task_counter")?,
@@ -212,12 +214,13 @@ pub fn update_git_settings(
     auto_branch: bool,
     auto_pr: bool,
     auto_push: bool,
+    auto_merge: bool,
     pr_base_branch: &str,
 ) {
     let conn = db.lock();
     if let Err(e) = conn.execute(
-        "UPDATE projects SET auto_branch=?1,auto_pr=?2,auto_push=?3,pr_base_branch=?4,updated_at=datetime('now','localtime') WHERE id=?5",
-        params![auto_branch as i64, auto_pr as i64, auto_push as i64, pr_base_branch, id],
+        "UPDATE projects SET auto_branch=?1,auto_pr=?2,auto_push=?3,auto_merge=?4,pr_base_branch=?5,updated_at=datetime('now','localtime') WHERE id=?6",
+        params![auto_branch as i64, auto_pr as i64, auto_push as i64, auto_merge as i64, pr_base_branch, id],
     ) { log::error!("update_git_settings: {}", e); }
 }
 

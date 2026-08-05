@@ -9,7 +9,7 @@ pub fn create_tables(conn: &Connection) {
             icon TEXT DEFAULT 'marble', icon_seed TEXT DEFAULT '',
             permission_mode TEXT DEFAULT 'auto-accept', allowed_tools TEXT DEFAULT '',
             auto_queue INTEGER DEFAULT 0, max_concurrent INTEGER DEFAULT 1,
-            auto_branch INTEGER DEFAULT 1, auto_pr INTEGER DEFAULT 0, auto_push INTEGER DEFAULT 0, pr_base_branch TEXT DEFAULT 'main',
+            auto_branch INTEGER DEFAULT 1, auto_pr INTEGER DEFAULT 0, auto_push INTEGER DEFAULT 0, auto_merge INTEGER DEFAULT 0, pr_base_branch TEXT DEFAULT 'main',
             project_key TEXT DEFAULT '', task_counter INTEGER DEFAULT 1000,
             task_timeout_minutes INTEGER DEFAULT 0,
             max_retries INTEGER DEFAULT 0, auto_test INTEGER DEFAULT 0, test_prompt TEXT DEFAULT '',
@@ -597,6 +597,14 @@ pub fn run_migrations(conn: &Connection) {
             "projects",
             "pr_provider",
             "ALTER TABLE projects ADD COLUMN pr_provider TEXT DEFAULT 'auto'",
+        ),
+        // Merge a completed task's branch into the base branch. Off by default:
+        // it moves the base branch and briefly switches the checkout, which is
+        // not something to start doing to an existing project unasked.
+        (
+            "projects",
+            "auto_merge",
+            "ALTER TABLE projects ADD COLUMN auto_merge INTEGER DEFAULT 0",
         ),
     ];
 

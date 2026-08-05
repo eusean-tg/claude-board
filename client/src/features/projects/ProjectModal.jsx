@@ -81,6 +81,7 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
   const [autoBranch, setAutoBranch] = useState(project?.auto_branch !== undefined ? !!project.auto_branch : true);
   const [autoPr, setAutoPr] = useState(project?.auto_pr ? true : false);
   const [autoPush, setAutoPush] = useState(project?.auto_push ? true : false);
+  const [autoMerge, setAutoMerge] = useState(project?.auto_merge ? true : false);
   const [prBaseBranch, setPrBaseBranch] = useState(project?.pr_base_branch || 'main');
   const [autoTest, setAutoTest] = useState(project?.auto_test ? true : false);
   const [testPrompt, setTestPrompt] = useState(project?.test_prompt || '');
@@ -123,9 +124,18 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
       if (autoBranch) setAutoBranch(false);
       if (autoPr) setAutoPr(false);
       if (autoPush) setAutoPush(false);
+      if (autoMerge) setAutoMerge(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gitDisabled]);
+
+  // Auto PR and Auto Merge are two different ways to land a branch, and the
+  // backend skips branch cleanup entirely while a PR may still be open. Clear
+  // the state rather than only disabling the row, or a stale `true` gets saved.
+  useEffect(() => {
+    if ((autoPr || !autoBranch) && autoMerge) setAutoMerge(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPr, autoBranch]);
 
   const handleGitInit = async () => {
     if (!workingDir.trim() || gitInitBusy) return;
@@ -190,6 +200,7 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
         autoBranch: !!autoBranch,
         autoPr: !!autoPr,
         autoPush: !!autoPush,
+        autoMerge: !!autoMerge,
         prBaseBranch: prBaseBranch.trim() || 'main',
         autoTest: !!autoTest,
         testPrompt: testPrompt.trim(),
@@ -515,6 +526,13 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
                         onToggle={() => !gitDisabled && setAutoBranch(!autoBranch)}
                         label={t('projectModal.autoBranch')}
                         desc={t('projectModal.autoBranchDesc')}
+                        activeColor="violet"
+                      />
+                      <ToggleRow
+                        enabled={autoMerge && !gitDisabled && autoBranch && !autoPr}
+                        onToggle={() => !gitDisabled && autoBranch && !autoPr && setAutoMerge(!autoMerge)}
+                        label={t('projectModal.autoMerge')}
+                        desc={autoPr ? t('projectModal.autoMergePrConflict') : t('projectModal.autoMergeDesc')}
                         activeColor="violet"
                       />
                       <ToggleRow
