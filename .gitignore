@@ -32,3 +32,9 @@ scripts/
 # vault-bridge
 .vault.json
 
+
+# Tauri build artifacts: tauri-build regenerates these on every Rust build,
+# so tracking them means a dirty tree after each build and constant merge noise.
+# They only feed editor validation of capabilities/*.json; nothing reads them at
+# runtime and the build recreates whatever is missing.
+src-tauri/gen/schemas/
