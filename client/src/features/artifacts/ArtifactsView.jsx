@@ -371,13 +371,19 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     // with its attribution nulled, so this only renders live ids.
                     const task = tasks?.find((candidate) => candidate.id === taskId);
                     return (
+                      // Stacked rather than side by side: a task key and a title
+                      // on one line overflow the chip and wrap. `max-w-full` on
+                      // the title is what lets `truncate` engage — in a flex
+                      // column the span is content-sized otherwise.
                       <button
                         key={taskId}
                         onClick={() => handleTaskChip(taskId)}
-                        className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[10px] text-surface-300 hover:text-claude transition-colors max-w-[240px]"
+                        className="flex flex-col items-start px-1.5 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[10px] text-left text-surface-300 hover:text-claude transition-colors max-w-[180px]"
                       >
-                        <span className="font-mono text-surface-500">{task?.task_key || `#${taskId}`}</span>
-                        {task?.title && <span className="truncate">{task.title}</span>}
+                        <span className="font-mono text-[9px] leading-tight text-surface-500">
+                          {task?.task_key || `#${taskId}`}
+                        </span>
+                        {task?.title && <span className="max-w-full truncate leading-tight">{task.title}</span>}
                       </button>
                     );
                   })}
