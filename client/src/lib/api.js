@@ -384,9 +384,11 @@ export const api = {
           }),
         // ─── Artifacts ───
         listArtifacts: (projectId) => tauriCall('list_artifacts', { projectId }),
-        getArtifact: (projectId, relPath) => tauriCall('get_artifact', { projectId, relPath }),
-        saveArtifact: (projectId, relPath, content) => tauriCall('save_artifact', { projectId, relPath, content }),
-        revealArtifact: (projectId, relPath) => tauriCall('reveal_artifact', { projectId, relPath }),
+        getArtifact: (id) => tauriCall('get_artifact', { id }),
+        updateArtifact: (id, content) => tauriCall('update_artifact', { id, content }),
+        deleteArtifact: (id) => tauriCall('delete_artifact', { id }),
+        artifactReference: (id) => tauriCall('artifact_reference', { id }),
+        revealArtifact: (id) => tauriCall('reveal_artifact', { id }),
       }
     : {}),
 };

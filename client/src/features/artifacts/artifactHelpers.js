@@ -1,7 +1,8 @@
 // Pure helpers for the artifacts browser. No React, no api.js — keep this unit-testable.
 //
 // An artifact is the shape returned by the `list_artifacts` command:
-// { rel_path, name, dir, title, preview, kind, size_bytes, modified_at, tasks: [...] }
+// { id, project_id, stored_name, source_rel_path, title, preview, kind, size,
+//   origin_task_id, last_task_id, created_at, updated_at }
 
 export const ARTIFACT_KINDS = ['all', 'plan', 'rfc', 'spec', 'readme', 'doc', 'other'];
 
@@ -16,7 +17,7 @@ const DAY = 24 * HOUR;
 const KB = 1024;
 const MB = KB * 1024;
 
-/** Case-insensitive substring match of `query` against name, rel_path and title. `kind: 'all'` matches everything. */
+/** Case-insensitive substring match of `query` against the stored name, source path and title. `kind: 'all'` matches everything. */
 export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
   if (!Array.isArray(artifacts)) return [];
   const needle = String(query ?? '')
@@ -27,31 +28,36 @@ export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
     if (!artifact) return false;
     if (kind !== 'all' && artifact.kind !== kind) return false;
     if (!needle) return true;
-    return [artifact.name, artifact.rel_path, artifact.title].some(
+    return [artifact.stored_name, artifact.source_rel_path, artifact.title].some(
       (field) => typeof field === 'string' && field.toLowerCase().includes(needle),
     );
   });
 }
 
-/** Groups artifacts into [{ dir, items }] — repo root first, then directories alphabetically. Item order is preserved. */
-export function groupByDirectory(artifacts) {
+/**
+ * Groups artifacts into [{ kind, artifacts }], ordered by ARTIFACT_KINDS and
+ * skipping empty groups. Item order within a group is preserved.
+ *
+ * Replaces the directory grouping the repository scan used: a flat store has no
+ * directories, and kind is the axis that survives.
+ */
+export function groupByKind(artifacts) {
   if (!Array.isArray(artifacts)) return [];
 
   const groups = new Map();
   for (const artifact of artifacts) {
     if (!artifact) continue;
-    const dir = typeof artifact.dir === 'string' ? artifact.dir : '';
-    if (!groups.has(dir)) groups.set(dir, []);
-    groups.get(dir).push(artifact);
+    const kind = typeof artifact.kind === 'string' && artifact.kind ? artifact.kind : 'other';
+    if (!groups.has(kind)) groups.set(kind, []);
+    groups.get(kind).push(artifact);
   }
 
-  return [...groups.keys()]
-    .sort((a, b) => {
-      if (a === '') return -1;
-      if (b === '') return 1;
-      return a.localeCompare(b);
-    })
-    .map((dir) => ({ dir, items: groups.get(dir) }));
+  const ordered = ARTIFACT_KINDS.filter((kind) => kind !== 'all' && groups.has(kind));
+  // A kind the backend added that the frontend does not know about must still
+  // show up rather than vanishing from the list.
+  const unknown = [...groups.keys()].filter((kind) => !ARTIFACT_KINDS.includes(kind)).sort();
+
+  return [...ordered, ...unknown].map((kind) => ({ kind, artifacts: groups.get(kind) }));
 }
 
 /** '820 B', '12.4 KB', '1.2 MB'. Returns '' for null, NaN or negative input. */

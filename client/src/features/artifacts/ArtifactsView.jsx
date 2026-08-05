@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { FileText, RefreshCw, Search, Pencil, Eye, FolderOpen, Copy, Save, Check } from 'lucide-react';
+import { FileText, RefreshCw, Search, Pencil, Eye, FolderOpen, Copy, Save, Check, Trash2 } from 'lucide-react';
 import MDEditor from '@uiw/react-md-editor';
 import { api, notifyError } from '../../lib/api';
 import { IS_TAURI } from '../../lib/tauriEvents';
@@ -10,7 +10,7 @@ import {
   ARTIFACT_KINDS,
   KIND_LABEL_KEYS,
   filterArtifacts,
-  groupByDirectory,
+  groupByKind,
   formatSize,
   formatModified,
 } from './artifactHelpers';
@@ -24,7 +24,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState('all');
 
-  const [selectedPath, setSelectedPath] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
   const [content, setContent] = useState('');
   const [originalContent, setOriginalContent] = useState('');
   const [contentLoading, setContentLoading] = useState(false);
@@ -33,6 +33,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // `t` gets a new identity whenever the language changes. Reading it through a ref keeps it
   // out of the fetch callbacks' deps, so switching language can't refetch and drop the selection.
@@ -66,49 +67,51 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
 
   // Switching projects invalidates the current selection along with the list.
   useEffect(() => {
-    setSelectedPath(null);
+    setSelectedId(null);
     setContent('');
     setOriginalContent('');
     setEditing(false);
     loadArtifacts();
   }, [loadArtifacts]);
 
-  const selectArtifact = useCallback(
-    async (artifact) => {
-      setSelectedPath(artifact.rel_path);
-      setEditing(false);
-      setContentLoading(true);
-      try {
-        const data = await api.getArtifact(projectId, artifact.rel_path);
-        const text = data?.content ?? '';
-        setContent(text);
-        setOriginalContent(text);
-      } catch (err) {
-        notifyError(err?.message || tRef.current('artifacts.loadFailed'));
-        setContent('');
-        setOriginalContent('');
-      } finally {
-        setContentLoading(false);
-      }
-    },
-    [projectId],
-  );
+  const selectArtifact = useCallback(async (artifact) => {
+    setSelectedId(artifact.id);
+    setEditing(false);
+    setContentLoading(true);
+    try {
+      const data = await api.getArtifact(artifact.id);
+      const text = data?.content ?? '';
+      setContent(text);
+      setOriginalContent(text);
+    } catch (err) {
+      notifyError(err?.message || tRef.current('artifacts.loadFailed'));
+      setContent('');
+      setOriginalContent('');
+    } finally {
+      setContentLoading(false);
+    }
+  }, []);
 
   const handleSave = useCallback(async () => {
-    if (!selectedPath) return;
+    if (!selectedId) return;
     setSaving(true);
     try {
-      await api.saveArtifact(projectId, selectedPath, content);
+      const updated = await api.updateArtifact(selectedId, content);
       setOriginalContent(content);
+      // The title, preview, kind and size are re-derived from the new content, so
+      // the row has to be refreshed or the list keeps showing the old heading.
+      if (updated) {
+        setArtifacts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+      }
       setSaved(true);
       clearTimeout(savedTimer.current);
       savedTimer.current = setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      notifyError(err?.message || tRef.current('artifacts.loadFailed'));
+      notifyError(err?.message || tRef.current('artifacts.saveFailed'));
     } finally {
       setSaving(false);
     }
-  }, [projectId, selectedPath, content]);
+  }, [selectedId, content]);
 
   useEffect(() => {
     if (!editing) return;
@@ -123,25 +126,46 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   }, [editing, handleSave]);
 
   const handleReveal = useCallback(async () => {
-    if (!selectedPath) return;
+    if (!selectedId) return;
     try {
-      await api.revealArtifact(projectId, selectedPath);
+      await api.revealArtifact(selectedId);
     } catch (err) {
       notifyError(err?.message || tRef.current('artifacts.loadFailed'));
     }
-  }, [projectId, selectedPath]);
+  }, [selectedId]);
 
+  // The absolute store path, not the source path: this is the form to hand an
+  // agent so it can read the document itself.
   const handleCopyPath = useCallback(async () => {
-    if (!selectedPath) return;
+    if (!selectedId) return;
     try {
-      await navigator.clipboard.writeText(selectedPath);
+      const ref = await api.artifactReference(selectedId);
+      await navigator.clipboard.writeText(ref?.path ?? '');
       setCopied(true);
       clearTimeout(copiedTimer.current);
       copiedTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       notifyError(err?.message || tRef.current('artifacts.loadFailed'));
     }
-  }, [selectedPath]);
+  }, [selectedId]);
+
+  const handleDelete = useCallback(async () => {
+    if (!selectedId) return;
+    if (!window.confirm(tRef.current('artifacts.deleteConfirm'))) return;
+    setDeleting(true);
+    try {
+      await api.deleteArtifact(selectedId);
+      setArtifacts((prev) => prev.filter((a) => a.id !== selectedId));
+      setSelectedId(null);
+      setContent('');
+      setOriginalContent('');
+      setEditing(false);
+    } catch (err) {
+      notifyError(err?.message || tRef.current('artifacts.deleteFailed'));
+    } finally {
+      setDeleting(false);
+    }
+  }, [selectedId]);
 
   // Task chips carry only ids; prefer the already-loaded task so the detail view opens instantly.
   const handleTaskChip = useCallback(
@@ -163,11 +187,17 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   );
 
   const filtered = useMemo(() => filterArtifacts(artifacts, { query, kind }), [artifacts, query, kind]);
-  const groups = useMemo(() => groupByDirectory(filtered), [filtered]);
+  const groups = useMemo(() => groupByKind(filtered), [filtered]);
   const selected = useMemo(
-    () => artifacts.find((artifact) => artifact.rel_path === selectedPath) ?? null,
-    [artifacts, selectedPath],
+    () => artifacts.find((artifact) => artifact.id === selectedId) ?? null,
+    [artifacts, selectedId],
   );
+
+  // An artifact records who first wrote it and who last wrote it; show each once.
+  const authoringTaskIds = useMemo(() => {
+    if (!selected) return [];
+    return [...new Set([selected.origin_task_id, selected.last_task_id].filter(Boolean))];
+  }, [selected]);
 
   const hasChanges = content !== originalContent;
 
@@ -232,15 +262,15 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
             <EmptyState icon={FileText} title={t('artifacts.empty')} description={t('artifacts.emptyDesc')} />
           ) : (
             groups.map((group) => (
-              <div key={group.dir}>
+              <div key={group.kind}>
                 <div className="sticky top-0 z-10 bg-surface-900 px-3 py-1.5 text-[10px] font-medium text-surface-500 truncate">
-                  {group.dir || project?.name || '/'}
+                  {t(KIND_LABEL_KEYS[group.kind] ?? KIND_LABEL_KEYS.other)}
                 </div>
-                {group.items.map((artifact) => {
-                  const isSelected = artifact.rel_path === selectedPath;
+                {group.artifacts.map((artifact) => {
+                  const isSelected = artifact.id === selectedId;
                   return (
                     <button
-                      key={artifact.rel_path}
+                      key={artifact.id}
                       onClick={() => selectArtifact(artifact)}
                       className={`w-full text-left px-3 py-2 border-b border-surface-800/50 transition-colors ${
                         isSelected ? 'bg-claude/15 text-claude' : 'hover:bg-surface-800/40'
@@ -248,16 +278,16 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     >
                       <div className="flex items-center gap-2">
                         <span className={`text-xs truncate ${isSelected ? '' : 'text-surface-200'}`}>
-                          {artifact.title || artifact.name}
+                          {artifact.title || artifact.stored_name}
                         </span>
                         <span className="ml-auto flex-shrink-0 text-[9px] font-medium px-1 py-0.5 rounded bg-surface-800 text-surface-400">
                           {t(KIND_LABEL_KEYS[artifact.kind] ?? KIND_LABEL_KEYS.other)}
                         </span>
                       </div>
-                      <div className="text-[10px] text-surface-600 truncate mt-0.5">{artifact.rel_path}</div>
+                      <div className="text-[10px] text-surface-600 truncate mt-0.5">{artifact.source_rel_path}</div>
                       <div className="flex items-center gap-2 text-[10px] text-surface-600 mt-0.5">
-                        <span>{formatModified(artifact.modified_at)}</span>
-                        <span>{formatSize(artifact.size_bytes)}</span>
+                        <span>{formatModified(artifact.updated_at)}</span>
+                        <span>{formatSize(artifact.size)}</span>
                       </div>
                     </button>
                   );
@@ -276,7 +306,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
             <>
               <div className="flex items-center gap-2 px-4 py-2 border-b border-surface-800 flex-shrink-0">
                 <FileText size={14} className="text-claude flex-shrink-0" />
-                <span className="text-xs text-surface-200 truncate">{selected.name}</span>
+                <span className="text-xs text-surface-200 truncate">{selected.title || selected.source_rel_path}</span>
                 {editing && hasChanges && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 flex-shrink-0">
                     {t('artifacts.unsaved')}
@@ -321,22 +351,36 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     <Copy size={11} />
                     {copied ? t('artifacts.copied') : t('artifacts.copyPath')}
                   </button>
+                  <button
+                    onClick={handleDelete}
+                    disabled={deleting}
+                    title={t('artifacts.delete')}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-800 text-surface-300 hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 text-[10px] font-medium transition-colors"
+                  >
+                    <Trash2 size={11} />
+                    {t('artifacts.delete')}
+                  </button>
                 </div>
               </div>
 
-              {selected.tasks?.length > 0 && (
+              {authoringTaskIds.length > 0 && (
                 <div className="flex items-center gap-1.5 flex-wrap px-4 py-1.5 border-b border-surface-800 flex-shrink-0">
                   <span className="text-[10px] text-surface-500">{t('artifacts.createdBy')}</span>
-                  {selected.tasks.map((task) => (
-                    <button
-                      key={task.task_id}
-                      onClick={() => handleTaskChip(task.task_id)}
-                      className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[10px] text-surface-300 hover:text-claude transition-colors max-w-[240px]"
-                    >
-                      <span className="font-mono text-surface-500">{task.task_key || `#${task.task_id}`}</span>
-                      <span className="truncate">{task.title}</span>
-                    </button>
-                  ))}
+                  {authoringTaskIds.map((taskId) => {
+                    // A task that has since been deleted leaves the artifact intact
+                    // with its attribution nulled, so this only renders live ids.
+                    const task = tasks?.find((candidate) => candidate.id === taskId);
+                    return (
+                      <button
+                        key={taskId}
+                        onClick={() => handleTaskChip(taskId)}
+                        className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[10px] text-surface-300 hover:text-claude transition-colors max-w-[240px]"
+                      >
+                        <span className="font-mono text-surface-500">{task?.task_key || `#${taskId}`}</span>
+                        {task?.title && <span className="truncate">{task.title}</span>}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 

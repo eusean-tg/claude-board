@@ -4,21 +4,24 @@ import {
   ARTIFACT_KINDS,
   KIND_LABEL_KEYS,
   filterArtifacts,
-  groupByDirectory,
+  groupByKind,
   formatSize,
   formatModified,
 } from '../artifactHelpers';
 
 const artifact = (overrides = {}) => ({
-  rel_path: 'README.md',
-  name: 'README.md',
-  dir: '',
+  id: 1,
+  project_id: 1,
+  stored_name: 'readme-1754400000.md',
+  source_rel_path: 'README.md',
   title: 'Readme',
   preview: 'hello',
   kind: 'readme',
-  size_bytes: 820,
-  modified_at: '2026-08-05T12:00:00Z',
-  tasks: [],
+  size: 820,
+  origin_task_id: null,
+  last_task_id: null,
+  created_at: '2026-08-05T12:00:00Z',
+  updated_at: '2026-08-05T12:00:00Z',
   ...overrides,
 });
 
@@ -33,15 +36,21 @@ describe('ARTIFACT_KINDS / KIND_LABEL_KEYS', () => {
 
 describe('filterArtifacts', () => {
   const artifacts = [
-    artifact({ rel_path: 'README.md', name: 'README.md', title: 'Readme', kind: 'readme' }),
+    artifact({ id: 1, stored_name: 'readme-1.md', source_rel_path: 'README.md', title: 'Readme', kind: 'readme' }),
     artifact({
-      rel_path: 'docs/rfcs/0001-queue.md',
-      name: '0001-queue.md',
+      id: 2,
+      stored_name: '0001-queue-2.md',
+      source_rel_path: 'docs/rfcs/0001-queue.md',
       title: 'Queue RFC',
-      dir: 'docs/rfcs',
       kind: 'rfc',
     }),
-    artifact({ rel_path: '.planning/PLAN.md', name: 'PLAN.md', title: 'Phase 3 plan', dir: '.planning', kind: 'plan' }),
+    artifact({
+      id: 3,
+      stored_name: 'plan-3.md',
+      source_rel_path: '.planning/PLAN.md',
+      title: 'Phase 3 plan',
+      kind: 'plan',
+    }),
   ];
 
   it('returns everything with no options', () => {
@@ -49,27 +58,27 @@ describe('filterArtifacts', () => {
     expect(filterArtifacts(artifacts, {})).toHaveLength(3);
   });
 
-  it('matches the query case-insensitively against name, rel_path and title', () => {
-    expect(filterArtifacts(artifacts, { query: 'QUEUE' }).map((a) => a.name)).toEqual(['0001-queue.md']);
-    expect(filterArtifacts(artifacts, { query: '.planning/' }).map((a) => a.name)).toEqual(['PLAN.md']);
-    expect(filterArtifacts(artifacts, { query: 'phase 3' }).map((a) => a.name)).toEqual(['PLAN.md']);
+  it('matches the query case-insensitively against the stored name, source path and title', () => {
+    expect(filterArtifacts(artifacts, { query: 'QUEUE' }).map((a) => a.id)).toEqual([2]);
+    expect(filterArtifacts(artifacts, { query: '.planning/' }).map((a) => a.id)).toEqual([3]);
+    expect(filterArtifacts(artifacts, { query: 'phase 3' }).map((a) => a.id)).toEqual([3]);
     expect(filterArtifacts(artifacts, { query: '  readme  ' })).toHaveLength(1);
     expect(filterArtifacts(artifacts, { query: 'nothing here' })).toEqual([]);
   });
 
   it('filters by kind, with "all" matching everything', () => {
     expect(filterArtifacts(artifacts, { kind: 'all' })).toHaveLength(3);
-    expect(filterArtifacts(artifacts, { kind: 'rfc' }).map((a) => a.name)).toEqual(['0001-queue.md']);
+    expect(filterArtifacts(artifacts, { kind: 'rfc' }).map((a) => a.id)).toEqual([2]);
     expect(filterArtifacts(artifacts, { kind: 'spec' })).toEqual([]);
   });
 
   it('combines query and kind', () => {
-    expect(filterArtifacts(artifacts, { query: 'md', kind: 'plan' }).map((a) => a.name)).toEqual(['PLAN.md']);
+    expect(filterArtifacts(artifacts, { query: 'md', kind: 'plan' }).map((a) => a.id)).toEqual([3]);
     expect(filterArtifacts(artifacts, { query: 'queue', kind: 'plan' })).toEqual([]);
   });
 
   it('tolerates missing fields, null entries and non-array input', () => {
-    const ragged = [artifact({ name: null, title: null, rel_path: 'docs/notes.md' }), null, undefined];
+    const ragged = [artifact({ stored_name: null, title: null, source_rel_path: 'docs/notes.md' }), null, undefined];
     expect(filterArtifacts(ragged, { query: 'notes' })).toHaveLength(1);
     expect(filterArtifacts(ragged, { query: 'readme' })).toEqual([]);
     expect(filterArtifacts(null)).toEqual([]);
@@ -78,31 +87,38 @@ describe('filterArtifacts', () => {
   });
 });
 
-describe('groupByDirectory', () => {
-  it('puts the repo root first and sorts the rest alphabetically', () => {
-    const grouped = groupByDirectory([
-      artifact({ name: 'b.md', dir: 'docs' }),
-      artifact({ name: 'root.md', dir: '' }),
-      artifact({ name: 'a.md', dir: '.planning' }),
-      artifact({ name: 'c.md', dir: 'docs' }),
+describe('groupByKind', () => {
+  it('orders groups by the canonical kind order and drops empty ones', () => {
+    const groups = groupByKind([
+      artifact({ id: 1, kind: 'doc' }),
+      artifact({ id: 2, kind: 'plan' }),
+      artifact({ id: 3, kind: 'plan' }),
     ]);
 
-    expect(grouped.map((g) => g.dir)).toEqual(['', '.planning', 'docs']);
-    expect(grouped[2].items.map((a) => a.name)).toEqual(['b.md', 'c.md']);
+    expect(groups.map((g) => g.kind)).toEqual(['plan', 'doc']);
+    expect(groups[0].artifacts.map((a) => a.id)).toEqual([2, 3]);
   });
 
-  it('treats a missing dir as the repo root', () => {
-    const grouped = groupByDirectory([
-      artifact({ name: 'x.md', dir: undefined }),
-      artifact({ name: 'y.md', dir: 'docs' }),
-    ]);
-    expect(grouped[0]).toEqual({ dir: '', items: [expect.objectContaining({ name: 'x.md' })] });
+  it('never lists the catch-all "all" pseudo-kind as a group', () => {
+    const groups = groupByKind([artifact({ kind: 'readme' })]);
+    expect(groups.map((g) => g.kind)).not.toContain('all');
+  });
+
+  it('treats a missing kind as other', () => {
+    const groups = groupByKind([artifact({ id: 9, kind: undefined })]);
+    expect(groups).toEqual([{ kind: 'other', artifacts: [expect.objectContaining({ id: 9 })] }]);
+  });
+
+  it('keeps a kind the frontend does not know about rather than dropping it', () => {
+    // A kind added backend-side must still be visible, at the end of the list.
+    const groups = groupByKind([artifact({ id: 1, kind: 'plan' }), artifact({ id: 2, kind: 'runbook' })]);
+    expect(groups.map((g) => g.kind)).toEqual(['plan', 'runbook']);
   });
 
   it('returns [] for empty, null and non-array input', () => {
-    expect(groupByDirectory([])).toEqual([]);
-    expect(groupByDirectory(null)).toEqual([]);
-    expect(groupByDirectory({ dir: 'docs' })).toEqual([]);
+    expect(groupByKind([])).toEqual([]);
+    expect(groupByKind(null)).toEqual([]);
+    expect(groupByKind('nope')).toEqual([]);
   });
 });
 

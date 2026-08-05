@@ -3,13 +3,23 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 const listArtifacts = vi.fn();
 const getArtifact = vi.fn();
+const updateArtifact = vi.fn();
+const deleteArtifact = vi.fn();
+const artifactReference = vi.fn();
 const revealArtifact = vi.fn();
-const saveArtifact = vi.fn();
 const getTask = vi.fn();
 const notifyError = vi.fn();
 
 vi.mock('../../../lib/api', () => ({
-  api: { listArtifacts, getArtifact, saveArtifact, revealArtifact, getTask },
+  api: {
+    listArtifacts,
+    getArtifact,
+    updateArtifact,
+    deleteArtifact,
+    artifactReference,
+    revealArtifact,
+    getTask,
+  },
   notifyError,
 }));
 
@@ -26,24 +36,32 @@ vi.mock('../../../i18n/I18nProvider', () => ({
 
 const ARTIFACTS = [
   {
-    rel_path: 'PLAN.md',
-    name: 'PLAN.md',
-    dir: '',
+    id: 11,
+    project_id: 1,
+    stored_name: 'plan-1754400000.md',
+    source_rel_path: 'PLAN.md',
     title: 'The Plan',
+    preview: 'a plan',
     kind: 'plan',
-    size_bytes: 2048,
-    modified_at: new Date().toISOString(),
-    tasks: [{ task_id: 7, task_key: 'CB-7', title: 'Do the thing' }],
+    size: 2048,
+    origin_task_id: 7,
+    last_task_id: 7,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   },
   {
-    rel_path: 'docs/spec.md',
-    name: 'spec.md',
-    dir: 'docs',
+    id: 12,
+    project_id: 1,
+    stored_name: 'spec-1754400001.md',
+    source_rel_path: 'docs/spec.md',
     title: null,
+    preview: '',
     kind: 'spec',
-    size_bytes: 500,
-    modified_at: null,
-    tasks: [],
+    size: 500,
+    origin_task_id: null,
+    last_task_id: null,
+    created_at: null,
+    updated_at: null,
   },
 ];
 
@@ -67,25 +85,36 @@ describe('ArtifactsView render states', () => {
 
     const { container } = render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
 
-    // loading: spinner present, selectPrompt in the right pane
     expect(container.querySelector('.animate-spin')).toBeTruthy();
 
     resolve(ARTIFACTS);
 
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
-    expect(screen.getByText('spec.md')).toBeTruthy();
-    expect(screen.getByText('docs')).toBeTruthy();
-    expect(screen.getByText('repo')).toBeTruthy(); // repo-root group header
+    // With no title, the row falls back to the stored filename.
+    expect(screen.getByText('spec-1754400001.md')).toBeTruthy();
+    // The source path is shown beneath the title.
+    expect(screen.getByText('docs/spec.md')).toBeTruthy();
     expect(screen.getByText('artifacts.fileCount:{"count":2}')).toBeTruthy();
     expect(screen.getByText('artifacts.selectPrompt')).toBeTruthy();
 
-    // select a row -> fetches + renders markdown
     fireEvent.click(screen.getByText('The Plan'));
     await waitFor(() => expect(screen.getByText('Hello')).toBeTruthy());
-    expect(getArtifact).toHaveBeenCalledWith(1, 'PLAN.md');
+    // Keyed on the artifact id, not a path.
+    expect(getArtifact).toHaveBeenCalledWith(11);
+  });
 
-    // task attribution chip resolves from the tasks prop
-    expect(screen.getByText('CB-7')).toBeTruthy();
+  it('groups rows by kind rather than by directory', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+
+    // A flat store has no directories; the group headers are kind labels. Each
+    // label also appears on the toolbar chip and each row badge, so all that can
+    // be asserted is that it appears more than once.
+    expect(screen.getAllByText('artifacts.kind.plan').length).toBeGreaterThan(1);
+    expect(screen.getAllByText('artifacts.kind.spec').length).toBeGreaterThan(1);
+    // The old directory grouping showed the project name for the repo root.
+    expect(screen.queryByText('repo')).toBeNull();
   });
 
   it('filters as you type and by kind', async () => {
@@ -95,12 +124,11 @@ describe('ArtifactsView render states', () => {
 
     fireEvent.change(screen.getByPlaceholderText('artifacts.search'), { target: { value: 'spec' } });
     await waitFor(() => expect(screen.queryByText('The Plan')).toBeNull());
-    expect(screen.getByText('spec.md')).toBeTruthy();
+    expect(screen.getByText('spec-1754400001.md')).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText('artifacts.search'), { target: { value: '' } });
-    // the label also appears on each row's kind badge; [0] is the toolbar chip
     fireEvent.click(screen.getAllByText('artifacts.kind.plan')[0]);
-    await waitFor(() => expect(screen.queryByText('spec.md')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('spec-1754400001.md')).toBeNull());
     expect(screen.getByText('The Plan')).toBeTruthy();
   });
 
@@ -129,10 +157,10 @@ describe('ArtifactsView render states', () => {
     expect(screen.getByText('artifacts.empty')).toBeTruthy();
   });
 
-  it('edits, saves via Cmd+S, and shows the transient confirmation', async () => {
+  it('edits, saves via Cmd+S, and refreshes the row from the response', async () => {
     listArtifacts.mockResolvedValue(ARTIFACTS);
     getArtifact.mockResolvedValue({ content: 'original' });
-    saveArtifact.mockResolvedValue(undefined);
+    updateArtifact.mockResolvedValue({ ...ARTIFACTS[0], title: 'Renamed by the edit' });
 
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
@@ -145,28 +173,122 @@ describe('ArtifactsView render states', () => {
     await waitFor(() => expect(screen.getByText('artifacts.unsaved')).toBeTruthy());
 
     fireEvent.keyDown(window, { key: 's', metaKey: true });
-    await waitFor(() => expect(saveArtifact).toHaveBeenCalledWith(1, 'PLAN.md', 'changed'));
+    await waitFor(() => expect(updateArtifact).toHaveBeenCalledWith(11, 'changed'));
     await waitFor(() => expect(screen.getByText('artifacts.saved')).toBeTruthy());
+    // Title, preview, kind and size are re-derived from the new content, so the
+    // list has to pick the refreshed row up. The selected artifact's title shows
+    // in both the row and the pane header, hence getAllByText.
+    await waitFor(() => expect(screen.getAllByText('Renamed by the edit').length).toBeGreaterThan(0));
   });
 
-  it('reveals and copies the path', async () => {
+  it('copies the absolute store path, not the source path', async () => {
     listArtifacts.mockResolvedValue(ARTIFACTS);
     getArtifact.mockResolvedValue({ content: 'x' });
-    revealArtifact.mockResolvedValue(undefined);
+    artifactReference.mockResolvedValue({
+      path: '/home/u/.claudeboard/artifacts/spec-1754400001.md',
+    });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
 
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
-    await waitFor(() => expect(screen.getByText('spec.md')).toBeTruthy());
-    fireEvent.click(screen.getByText('spec.md'));
+    await waitFor(() => expect(screen.getByText('spec-1754400001.md')).toBeTruthy());
+    fireEvent.click(screen.getByText('spec-1754400001.md'));
+    await waitFor(() => expect(screen.getByText('artifacts.copyPath')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('artifacts.copyPath'));
+    // The path an agent can actually read, which the source path is not.
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('/home/u/.claudeboard/artifacts/spec-1754400001.md'));
+    await waitFor(() => expect(screen.getByText('artifacts.copied')).toBeTruthy());
+  });
+
+  it('reveals the selected artifact by id', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    getArtifact.mockResolvedValue({ content: 'x' });
+    revealArtifact.mockResolvedValue(undefined);
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('spec-1754400001.md')).toBeTruthy());
+    fireEvent.click(screen.getByText('spec-1754400001.md'));
     await waitFor(() => expect(screen.getByText('artifacts.reveal')).toBeTruthy());
 
     fireEvent.click(screen.getByText('artifacts.reveal'));
-    await waitFor(() => expect(revealArtifact).toHaveBeenCalledWith(1, 'docs/spec.md'));
+    await waitFor(() => expect(revealArtifact).toHaveBeenCalledWith(12));
+  });
 
-    fireEvent.click(screen.getByText('artifacts.copyPath'));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('docs/spec.md'));
-    await waitFor(() => expect(screen.getByText('artifacts.copied')).toBeTruthy());
+  it('deletes after confirmation and drops the row from the list', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    getArtifact.mockResolvedValue({ content: 'x' });
+    deleteArtifact.mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+    await waitFor(() => expect(screen.getByText('artifacts.delete')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('artifacts.delete'));
+    await waitFor(() => expect(deleteArtifact).toHaveBeenCalledWith(11));
+    // Row gone and the selection cleared, without a refetch.
+    await waitFor(() => expect(screen.queryByText('The Plan')).toBeNull());
+    expect(screen.getByText('artifacts.selectPrompt')).toBeTruthy();
+    confirm.mockRestore();
+  });
+
+  it('does not delete when the confirmation is declined', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    getArtifact.mockResolvedValue({ content: 'x' });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+    await waitFor(() => expect(screen.getByText('artifacts.delete')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('artifacts.delete'));
+
+    expect(deleteArtifact).not.toHaveBeenCalled();
+    // Still selected, so the title appears in both the row and the pane header.
+    expect(screen.getAllByText('The Plan').length).toBeGreaterThan(0);
+    confirm.mockRestore();
+  });
+
+  it('shows one attribution chip per authoring task', async () => {
+    listArtifacts.mockResolvedValue([{ ...ARTIFACTS[0], origin_task_id: 7, last_task_id: 9 }]);
+    getArtifact.mockResolvedValue({ content: 'x' });
+
+    render(
+      <ArtifactsView
+        projectId={1}
+        project={{ name: 'repo' }}
+        tasks={[
+          { id: 7, task_key: 'CB-7', title: 'wrote it' },
+          { id: 9, task_key: 'CB-9', title: 'edited it' },
+        ]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+
+    await waitFor(() => expect(screen.getByText('CB-7')).toBeTruthy());
+    expect(screen.getByText('CB-9')).toBeTruthy();
+  });
+
+  it('shows a single chip when one task both created and last wrote the document', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    getArtifact.mockResolvedValue({ content: 'x' });
+
+    render(
+      <ArtifactsView
+        projectId={1}
+        project={{ name: 'repo' }}
+        tasks={[{ id: 7, task_key: 'CB-7', title: 'wrote it' }]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+
+    // origin and last are the same task; it must not be listed twice.
+    await waitFor(() => expect(screen.getAllByText('CB-7')).toHaveLength(1));
   });
 
   it('falls back to api.getTask for a chip missing from the tasks prop', async () => {
@@ -178,9 +300,10 @@ describe('ArtifactsView render states', () => {
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} onViewDetail={onViewDetail} />);
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
     fireEvent.click(screen.getByText('The Plan'));
-    await waitFor(() => expect(screen.getByText('CB-7')).toBeTruthy());
+    // No matching task in the prop, so the chip falls back to the raw id.
+    await waitFor(() => expect(screen.getByText('#7')).toBeTruthy());
 
-    fireEvent.click(screen.getByText('CB-7'));
+    fireEvent.click(screen.getByText('#7'));
     await waitFor(() => expect(getTask).toHaveBeenCalledWith(7));
     expect(onViewDetail).toHaveBeenCalledWith({ id: 7, title: 'fetched' });
   });
@@ -190,7 +313,7 @@ describe('ArtifactsView render states', () => {
     getArtifact.mockResolvedValue({ content: 'x' });
     getTask.mockRejectedValue(new Error('gone'));
     const onViewDetail = vi.fn();
-    const local = { id: 7, title: 'local' };
+    const local = { id: 7, task_key: 'CB-7', title: 'local' };
 
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[local]} onViewDetail={onViewDetail} />);
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
