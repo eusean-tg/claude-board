@@ -26,7 +26,10 @@ pub fn create_tables(conn: &Connection) {
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '',
-            status TEXT DEFAULT 'backlog' CHECK(status IN ('backlog','in_progress','testing','done')),
+            -- Unconstrained on purpose: the legal values and the legal transitions
+            -- between them live in claude::state_machine, and a CHECK here is a
+            -- second list that silently rejects statuses the app already uses.
+            status TEXT DEFAULT 'backlog',
             priority INTEGER DEFAULT 0,
             task_type TEXT DEFAULT 'feature' CHECK(task_type IN ('feature','bugfix','refactor','docs','test','chore')),
             acceptance_criteria TEXT DEFAULT '', model TEXT DEFAULT 'sonnet', thinking_effort TEXT DEFAULT 'medium',
@@ -775,83 +778,9 @@ pub fn run_migrations(conn: &Connection) {
     )
     .ok();
 
-    // Migrate tasks table to support 'awaiting_approval' status (remove CHECK constraint)
-    {
-        let needs_migration = conn
-            .execute(
-                "UPDATE tasks SET status='awaiting_approval' WHERE id=-1",
-                [],
-            )
-            .is_err();
-        if needs_migration {
-            log::info!("Migrating tasks table to support 'awaiting_approval' status...");
-            let tx_result: Result<(), rusqlite::Error> = (|| {
-                conn.execute_batch("BEGIN IMMEDIATE")?;
-                conn.execute_batch("
-                    CREATE TABLE IF NOT EXISTS tasks_v3 (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        project_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '',
-                        status TEXT DEFAULT 'backlog',
-                        priority INTEGER DEFAULT 0,
-                        task_type TEXT DEFAULT 'feature' CHECK(task_type IN ('feature','bugfix','refactor','docs','test','chore')),
-                        acceptance_criteria TEXT DEFAULT '', model TEXT DEFAULT 'sonnet', thinking_effort TEXT DEFAULT 'medium',
-                        sort_order INTEGER DEFAULT 0, queue_position INTEGER DEFAULT 0,
-                        branch_name TEXT, claude_session_id TEXT,
-                        input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-                        cache_read_tokens INTEGER DEFAULT 0, cache_creation_tokens INTEGER DEFAULT 0,
-                        total_cost REAL DEFAULT 0, num_turns INTEGER DEFAULT 0, rate_limit_hits INTEGER DEFAULT 0,
-                        revision_count INTEGER DEFAULT 0, model_used TEXT,
-                        started_at DATETIME, completed_at DATETIME,
-                        work_duration_ms INTEGER DEFAULT 0, last_resumed_at DATETIME,
-                        commits TEXT DEFAULT '[]', pr_url TEXT, diff_stat TEXT,
-                        role_id INTEGER, task_key TEXT DEFAULT '',
-                        created_at DATETIME DEFAULT (datetime('now','localtime')),
-                        updated_at DATETIME DEFAULT (datetime('now','localtime')),
-                        test_report TEXT, depends_on INTEGER, retry_count INTEGER DEFAULT 0,
-                        context_summary TEXT, parent_task_id INTEGER, awaiting_subtasks INTEGER DEFAULT 0,
-                        tags TEXT DEFAULT '[]', lifecycle_summary TEXT, retry_after DATETIME,
-                        github_issue_number INTEGER, github_issue_url TEXT, deleted_at TEXT DEFAULT NULL,
-                        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-                    )
-                ")?;
-                conn.execute_batch(
-                    "
-                    INSERT INTO tasks_v3 SELECT
-                        id, project_id, title, description, status, priority, task_type,
-                        acceptance_criteria, model, thinking_effort, sort_order, queue_position,
-                        branch_name, claude_session_id,
-                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                        total_cost, num_turns, rate_limit_hits, revision_count, model_used,
-                        started_at, completed_at, work_duration_ms, last_resumed_at,
-                        commits, pr_url, diff_stat, role_id, task_key,
-                        created_at, updated_at,
-                        test_report, depends_on, retry_count,
-                        context_summary, parent_task_id, awaiting_subtasks,
-                        tags, lifecycle_summary, retry_after,
-                        github_issue_number, github_issue_url, deleted_at
-                    FROM tasks
-                ",
-                )?;
-                conn.execute_batch("DROP TABLE tasks")?;
-                conn.execute_batch("ALTER TABLE tasks_v3 RENAME TO tasks")?;
-                conn.execute_batch("
-                    CREATE INDEX IF NOT EXISTS idx_task_logs_task_id ON task_logs(task_id);
-                    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-                    CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
-                    CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status);
-                    CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at)
-                ")?;
-                conn.execute_batch("COMMIT")?;
-                Ok(())
-            })();
-            if let Err(e) = tx_result {
-                log::error!("awaiting_approval migration failed, rolling back: {}", e);
-                conn.execute_batch("ROLLBACK").ok();
-            } else {
-                log::info!("Tasks table migration for awaiting_approval completed");
-            }
-        }
-    }
+    // Lift the four-value CHECK on tasks.status so every status the state machine
+    // defines can actually be stored.
+    migrate_tasks_status_check(conn);
 
     // Achievements table
     conn.execute_batch(
@@ -968,6 +897,116 @@ pub fn run_migrations(conn: &Connection) {
     // Reshape the artifacts table for explicit saves: no captured_hash or
     // conflict_at, no UNIQUE on a repository path, and a tags column.
     migrate_artifacts_v2(conn);
+}
+
+/// Cuts the `CHECK(status IN (...))` clause out of a `CREATE TABLE` statement,
+/// returning it verbatim so the caller can remove exactly that substring.
+///
+/// Matched by paren counting rather than a literal, because the clause names its
+/// allowed values and those differ between installs of different vintages.
+fn status_check_clause(sql: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = sql[from..].find("CHECK") {
+        let start = from + rel;
+        from = start + "CHECK".len();
+        let open = sql[start..].find('(').map(|i| start + i)?;
+        // `CHECK(task_type IN (...))` and friends are other columns' business.
+        let constrains_status = sql[open + 1..]
+            .trim_start()
+            .strip_prefix("status")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+        if !constrains_status {
+            continue;
+        }
+        let mut depth = 0;
+        for (i, c) in sql[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(sql[start..open + i + c.len_utf8()].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// Rebuilds `tasks` without the `CHECK` constraint on `status`.
+///
+/// Databases created before this migration carry `CHECK(status IN ('backlog',
+/// 'in_progress','testing','done'))`, which rejects `failed`, `awaiting_approval`
+/// and `blocked` — three statuses the app sets. SQLite cannot drop a constraint,
+/// so lifting it means rebuilding the table.
+///
+/// Detection reads the constraint out of `sqlite_master`. A write probe cannot
+/// tell: a CHECK is evaluated per row, so a statement matching no rows succeeds
+/// whether the constraint is there or not.
+///
+/// The replacement table is the live definition with that one clause cut out, so
+/// every column, default and foreign key carries over unchanged. A hand-written
+/// column list drifts from the real table as later migrations add columns, and
+/// drops whatever it has not caught up with.
+pub(crate) fn migrate_tasks_status_check(conn: &Connection) {
+    let Ok(sql) = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+        [],
+        |r| r.get::<_, String>(0),
+    ) else {
+        return;
+    };
+    let Some(check) = status_check_clause(&sql) else {
+        return;
+    };
+    let Some(body) = sql.find('(').map(|i| &sql[i..]) else {
+        return;
+    };
+
+    log::info!("Lifting the CHECK constraint on tasks.status");
+
+    // Foreign keys must be off across the swap: DROP TABLE performs an implicit
+    // DELETE FROM, and eight child tables cascade off tasks(id) — a live database
+    // would lose every task log and event. The pragma is a no-op inside a
+    // transaction, so it is set before BEGIN and restored after COMMIT.
+    conn.execute_batch("PRAGMA foreign_keys = OFF").ok();
+    let rebuilt: Result<(), rusqlite::Error> = (|| {
+        // Indexes are dropped with the table. Replaying their own DDL rebuilds
+        // whatever the database actually has; a hardcoded list rebuilds only the
+        // indexes that existed when the list was written.
+        let indexes: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT sql FROM sqlite_master
+                  WHERE type='index' AND tbl_name='tasks' AND sql IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(&format!(
+            "CREATE TABLE tasks_status_v4 {}",
+            body.replace(&check, "")
+        ))?;
+        // SELECT * is safe here, and only here: tasks_status_v4 was built from the
+        // live definition, so its columns match tasks in both name and order.
+        conn.execute_batch("INSERT INTO tasks_status_v4 SELECT * FROM tasks")?;
+        conn.execute_batch("DROP TABLE tasks")?;
+        conn.execute_batch("ALTER TABLE tasks_status_v4 RENAME TO tasks")?;
+        for idx in &indexes {
+            conn.execute_batch(idx)?;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+    if let Err(e) = rebuilt {
+        log::error!("Lifting the tasks.status CHECK failed, rolling back: {}", e);
+        conn.execute_batch("ROLLBACK").ok();
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON").ok();
 }
 
 /// Rebuild `artifacts` for explicitly-saved documents.
@@ -1381,5 +1420,158 @@ mod model_migration_tests {
         migrate_models_v2(&conn);
         assert!(ids(&conn, "SELECT model_id FROM custom_models").is_empty());
         assert!(ids(&conn, "SELECT model_id FROM model_tombstones").is_empty());
+    }
+
+    // ─── tasks.status CHECK constraint ──────────────────────────────────────
+
+    fn tasks_sql(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A database in the shape every install shipped with: `tasks.status` pinned
+    /// to four values, a cascading child table, a column added by a later
+    /// migration, and an index that is not one of the four the old rebuild knew.
+    fn legacy_tasks_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT DEFAULT 'backlog' CHECK(status IN ('backlog','in_progress','testing','done')),
+                task_type TEXT DEFAULT 'feature' CHECK(task_type IN ('feature','bugfix')),
+                task_key TEXT DEFAULT '',
+                agent_name TEXT DEFAULT '',
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE task_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                message TEXT,
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX idx_tasks_key_unique ON tasks(task_key) WHERE task_key != '';
+            INSERT INTO projects (id, name) VALUES (1, 'p');
+            INSERT INTO tasks (id, project_id, title, task_key, agent_name)
+                VALUES (1, 1, 't', 'FTR-CB-1', 'scout');
+            INSERT INTO task_logs (task_id, message) VALUES (1, 'kept');
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_legacy_database_stores_every_status_after_migrating() {
+        let conn = legacy_tasks_db();
+        // The four-value CHECK is why these are rejected beforehand. Until it is
+        // lifted, adding a variant to TaskStatus changes nothing the app can save.
+        assert!(conn
+            .execute("UPDATE tasks SET status='blocked' WHERE id=1", [])
+            .is_err());
+
+        migrate_tasks_status_check(&conn);
+
+        for s in ["blocked", "failed", "awaiting_approval", "in_progress"] {
+            conn.execute("UPDATE tasks SET status=?1 WHERE id=1", [s])
+                .unwrap_or_else(|e| panic!("{s} must be storable after the migration: {e}"));
+        }
+    }
+
+    #[test]
+    fn migrating_keeps_child_rows_late_columns_and_indexes() {
+        let conn = legacy_tasks_db();
+
+        migrate_tasks_status_check(&conn);
+
+        // DROP TABLE performs an implicit DELETE FROM, so with foreign keys on,
+        // every task_logs row cascades away with the old table.
+        let logs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logs, 1, "child rows must survive the rebuild");
+        // A hand-written column list drops whatever a later migration added.
+        let agent: String = conn
+            .query_row("SELECT agent_name FROM tasks WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(agent, "scout");
+        // Indexes are dropped with the table and have to be replayed.
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='idx_tasks_key_unique'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "the unique task_key index must be replayed");
+        // Every other constraint on the table is none of this migration's business.
+        assert!(conn
+            .execute("UPDATE tasks SET task_type='nonsense' WHERE id=1", [])
+            .is_err());
+    }
+
+    #[test]
+    fn migrating_restores_foreign_key_enforcement() {
+        let conn = legacy_tasks_db();
+
+        migrate_tasks_status_check(&conn);
+
+        // The swap turns foreign keys off. Leaving them off would silently drop
+        // every cascade and every reference check for the rest of the session.
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        assert!(
+            conn.execute("INSERT INTO task_logs (task_id) VALUES (999)", [])
+                .is_err(),
+            "a log row for a task that does not exist must still be refused"
+        );
+    }
+
+    #[test]
+    fn migrating_twice_changes_nothing_the_second_time() {
+        let conn = legacy_tasks_db();
+        migrate_tasks_status_check(&conn);
+        let after_first = tasks_sql(&conn);
+
+        migrate_tasks_status_check(&conn);
+
+        assert_eq!(
+            tasks_sql(&conn),
+            after_first,
+            "a second run must be a no-op"
+        );
+    }
+
+    #[test]
+    fn a_fresh_install_never_had_the_status_check() {
+        // Fresh installs get their table from create_tables, so the CREATE has to
+        // permit every status on its own — the migration only repairs old files.
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn);
+
+        let sql = tasks_sql(&conn);
+
+        assert!(!sql.contains("CHECK(status IN"), "still constrained: {sql}");
+        conn.execute(
+            "INSERT INTO projects (id, name, slug, working_dir) VALUES (1, 'p', 'p', '/tmp/p')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (project_id, title, status) VALUES (1, 't', 'blocked')",
+            [],
+        )
+        .unwrap();
     }
 }
