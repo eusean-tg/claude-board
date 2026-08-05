@@ -382,6 +382,11 @@ export const api = {
             phaseTitle,
             autoStart: autoStart ?? true,
           }),
+        // ─── Artifacts ───
+        listArtifacts: (projectId) => tauriCall('list_artifacts', { projectId }),
+        getArtifact: (projectId, relPath) => tauriCall('get_artifact', { projectId, relPath }),
+        saveArtifact: (projectId, relPath, content) => tauriCall('save_artifact', { projectId, relPath, content }),
+        revealArtifact: (projectId, relPath) => tauriCall('reveal_artifact', { projectId, relPath }),
       }
     : {}),
 };
