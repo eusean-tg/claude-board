@@ -495,7 +495,9 @@ pub fn run() {
             // Artifacts
             commands::artifacts::list_artifacts,
             commands::artifacts::get_artifact,
-            commands::artifacts::save_artifact,
+            commands::artifacts::update_artifact,
+            commands::artifacts::delete_artifact,
+            commands::artifacts::artifact_reference,
             commands::artifacts::reveal_artifact,
         ])
         .on_menu_event(|app, event| {
