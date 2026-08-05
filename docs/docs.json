@@ -107,7 +107,8 @@
                   "features/templates",
                   "features/prompt-templates",
                   "features/snippets",
-                  "features/attachments"
+                  "features/attachments",
+                  "features/artifacts"
                 ]
               },
               {
@@ -253,7 +254,8 @@
                   "tr/features/templates",
                   "tr/features/prompt-templates",
                   "tr/features/snippets",
-                  "tr/features/attachments"
+                  "tr/features/attachments",
+                  "tr/features/artifacts"
                 ]
               },
               {
