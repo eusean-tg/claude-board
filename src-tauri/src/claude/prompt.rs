@@ -208,7 +208,16 @@ pub fn build_prompt(
          revise one instead of saving a second copy of it."
             .into(),
     );
-    parts.push(format!("Use these tools when the task description asks you to plan, break down work, or manage tasks. The current project_id is {}.", project_id));
+    // Scoped to the task-management tools on purpose. This line used to gate every
+    // tool listed above behind "when the task description asks you to", which told
+    // the agent to wait to be asked — so save_artifact was never called unless the
+    // user named it.
+    parts.push(format!("Use the task tools above when the task description asks you to plan, break down work, or manage tasks. The current project_id is {}.", project_id));
+    parts.push(
+        "The artifact tools are different: reach for save_artifact whenever this task \
+         produces a document, without being asked."
+            .into(),
+    );
 
     parts.push("\n## Instructions".into());
     parts.push(format!(
@@ -216,6 +225,18 @@ pub fn build_prompt(
         task.task_type.as_deref().unwrap_or("feature")
     ));
     parts.push("- Complete this task thoroughly and commit your changes.".into());
+    // Placed among the imperatives rather than only in the tool inventory above: a
+    // list of capabilities describes what is possible, while this describes what to
+    // do, and it triggers on the agent's own output rather than on being asked.
+    parts.push(format!(
+        "- If you produce a document as part of this task — a plan, a design note, a \
+         research summary, a decision record, a progress log — save it with the \
+         **save_artifact** tool (project_id: {}, task_id: {}) instead of writing it \
+         into the repository. Give it a real title, a kind, and tags. Code, config, \
+         and documentation that ships as part of the codebase are not artifacts and \
+         belong in the repository as usual.",
+        project_id, task.id
+    ));
 
     let branch = task.branch_name.as_deref().unwrap_or("");
     let auto_branch_on = project
@@ -282,12 +303,73 @@ pub fn build_prompt(
 mod tests {
     use super::*;
 
+    /// A prompt with nothing but the defaults, for asserting on the boilerplate.
+    fn minimal_prompt() -> String {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "project_id": 1,
+            "title": "Do the thing",
+        }))
+        .unwrap();
+        build_prompt(&task, &[], &[], &[], &[], None, 1, &[], None, None)
+    }
+
     fn artifact_ref(title: &str, kind: &str, path: &str) -> ArtifactRef {
         ArtifactRef {
             title: title.into(),
             kind: kind.into(),
             path: path.into(),
         }
+    }
+
+    #[test]
+    fn the_artifact_tools_are_not_gated_behind_being_asked() {
+        let prompt = minimal_prompt();
+
+        // The old wording — "Use these tools when the task description asks you
+        // to" — sat under the whole tool list and told the agent to wait. That is
+        // why save_artifact was never called unless the user named it.
+        assert!(
+            prompt.contains("Use the task tools above when the task description asks you to"),
+            "the gate must name the task tools, not all of them"
+        );
+        assert!(
+            !prompt.contains("Use these tools when the task description asks you to"),
+            "the un-scoped gate is what suppressed save_artifact"
+        );
+    }
+
+    #[test]
+    fn saving_a_document_is_an_instruction_not_just_a_capability() {
+        let prompt = minimal_prompt();
+        let instructions = prompt
+            .split("## Instructions")
+            .nth(1)
+            .expect("the prompt has an Instructions section");
+
+        // A capability inventory says what is possible; this has to say what to do,
+        // in the section holding the other imperatives.
+        assert!(
+            instructions.contains("save_artifact"),
+            "got {}",
+            instructions
+        );
+        assert!(
+            instructions.contains("without being asked") || instructions.contains("If you produce"),
+            "the instruction has to trigger on the agent's own output"
+        );
+    }
+
+    #[test]
+    fn the_instruction_says_what_is_not_an_artifact() {
+        let prompt = minimal_prompt();
+        // Without this, a docs-site page or a source file gets saved as an
+        // artifact — the false positive that killed the capture approach.
+        assert!(
+            prompt.contains("belong in the repository"),
+            "got {}",
+            prompt
+        );
     }
 
     #[test]
