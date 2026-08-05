@@ -7,6 +7,7 @@ const updateArtifact = vi.fn();
 const deleteArtifact = vi.fn();
 const artifactReference = vi.fn();
 const revealArtifact = vi.fn();
+const setArtifactTags = vi.fn();
 const getTask = vi.fn();
 const notifyError = vi.fn();
 
@@ -18,6 +19,7 @@ vi.mock('../../../lib/api', () => ({
     deleteArtifact,
     artifactReference,
     revealArtifact,
+    setArtifactTags,
     getTask,
   },
   notifyError,
@@ -143,6 +145,21 @@ describe('ArtifactsView render states', () => {
 
     // Still one call: another project's completion must not refetch this list.
     expect(listArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('filters by a tag from the toolbar', async () => {
+    listArtifacts.mockResolvedValue([
+      { ...ARTIFACTS[0], tags: '["context"]' },
+      { ...ARTIFACTS[1], tags: '["scratch"]' },
+    ]);
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: '#context' }));
+
+    await waitFor(() => expect(screen.queryByText('spec-1754400001.md')).toBeNull());
+    expect(screen.getByText('The Plan')).toBeTruthy();
   });
 
   it('groups rows by kind rather than by directory', async () => {

@@ -5,6 +5,7 @@ import {
   KIND_LABEL_KEYS,
   filterArtifacts,
   groupByKind,
+  allTags,
   formatSize,
   formatModified,
 } from '../artifactHelpers';
@@ -20,6 +21,7 @@ const artifact = (overrides = {}) => ({
   size: 820,
   origin_task_id: null,
   last_task_id: null,
+  tags: '[]',
   created_at: '2026-08-05T12:00:00Z',
   updated_at: '2026-08-05T12:00:00Z',
   ...overrides,
@@ -119,6 +121,39 @@ describe('groupByKind', () => {
     expect(groupByKind([])).toEqual([]);
     expect(groupByKind(null)).toEqual([]);
     expect(groupByKind('nope')).toEqual([]);
+  });
+});
+
+describe('tag filtering', () => {
+  const artifacts = [
+    artifact({ id: 1, kind: 'plan', tags: '["context","shared"]' }),
+    artifact({ id: 2, kind: 'plan', tags: '["scratch"]' }),
+    artifact({ id: 3, kind: 'doc', tags: '[]' }),
+  ];
+
+  it('filters by tag alongside kind and query', () => {
+    expect(filterArtifacts(artifacts, { tag: 'context' }).map((a) => a.id)).toEqual([1]);
+    expect(filterArtifacts(artifacts, { tag: 'context', kind: 'doc' })).toEqual([]);
+    expect(filterArtifacts(artifacts, { tag: null }).map((a) => a.id)).toEqual([1, 2, 3]);
+  });
+
+  it('tolerates a malformed tags field rather than throwing', () => {
+    // The column is free-form text; a bad value must not take the list down.
+    const ragged = [artifact({ id: 9, tags: 'not json' })];
+    expect(filterArtifacts(ragged, { tag: 'context' })).toEqual([]);
+    expect(allTags(ragged)).toEqual([]);
+  });
+});
+
+describe('allTags', () => {
+  it('returns every tag in use, deduplicated and sorted', () => {
+    const tags = allTags([artifact({ id: 1, tags: '["shared","context"]' }), artifact({ id: 2, tags: '["context"]' })]);
+    expect(tags).toEqual(['context', 'shared']);
+  });
+
+  it('skips blank tags and non-array input', () => {
+    expect(allTags([artifact({ tags: '["  ",""]' })])).toEqual([]);
+    expect(allTags(null)).toEqual([]);
   });
 });
 

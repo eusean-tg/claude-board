@@ -534,6 +534,8 @@ export default {
   'artifacts.refRemove': 'Remove reference',
   'artifacts.refAddFailed': 'Failed to reference the document',
   'artifacts.refRemoveFailed': 'Failed to remove the reference',
+  'artifacts.addTag': 'Add tag...',
+  'artifacts.tagsFailed': 'Failed to update the tags',
   'detail.documents': 'Documents',
   'detail.documentsHint':
     'Documents referenced here are given to the agent by path, so it can read and update them as it works.',

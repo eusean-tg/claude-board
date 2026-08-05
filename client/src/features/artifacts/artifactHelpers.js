@@ -1,3 +1,5 @@
+import { parseTags } from '../board/TagBadge';
+
 // Pure helpers for the artifacts browser. No React, no api.js — keep this unit-testable.
 //
 // An artifact is the shape returned by the `list_artifacts` command:
@@ -18,7 +20,7 @@ const KB = 1024;
 const MB = KB * 1024;
 
 /** Case-insensitive substring match of `query` against the stored name, title and origin. `kind: 'all'` matches everything. */
-export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
+export function filterArtifacts(artifacts, { query = '', kind = 'all', tag = null } = {}) {
   if (!Array.isArray(artifacts)) return [];
   const needle = String(query ?? '')
     .trim()
@@ -27,11 +29,24 @@ export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
   return artifacts.filter((artifact) => {
     if (!artifact) return false;
     if (kind !== 'all' && artifact.kind !== kind) return false;
+    if (tag && !parseTags(artifact.tags).includes(tag)) return false;
     if (!needle) return true;
     return [artifact.stored_name, artifact.title, artifact.origin].some(
       (field) => typeof field === 'string' && field.toLowerCase().includes(needle),
     );
   });
+}
+
+/** Every tag in use, sorted, for the filter row. */
+export function allTags(artifacts) {
+  if (!Array.isArray(artifacts)) return [];
+  const seen = new Set();
+  for (const artifact of artifacts) {
+    for (const tag of parseTags(artifact?.tags)) {
+      if (typeof tag === 'string' && tag.trim()) seen.add(tag);
+    }
+  }
+  return [...seen].sort();
 }
 
 /**

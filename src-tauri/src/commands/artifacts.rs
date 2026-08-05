@@ -95,6 +95,17 @@ pub fn task_artifacts(task_id: i64) -> Result<Vec<StoredArtifact>, String> {
     Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
 }
 
+/// Replace an artifact's tags.
+///
+/// The tags are the whole set, not an addition: the editor sends what the document
+/// should be filed under, which is simpler to reason about than a diff.
+#[tauri::command]
+pub fn set_artifact_tags(id: i64, tags: Vec<String>) -> Result<StoredArtifact, String> {
+    let db = db::get_db();
+    artifact_store::revise(&db, &data_dir(), id, None, None, None, Some(&tags), None)?;
+    db::artifacts::get(&db, id).ok_or_else(|| "Artifact not found".to_string())
+}
+
 /// Reconcile the index with the store, and report what changed.
 #[tauri::command]
 pub fn repair_artifacts(project_id: i64) -> Result<artifact_store::RepairReport, String> {

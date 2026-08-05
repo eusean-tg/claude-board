@@ -7,14 +7,27 @@ import { useTranslation } from '../../i18n/I18nProvider';
 import Spinner from '../../components/Spinner';
 import EmptyState from '../../components/EmptyState';
 import InlineDeleteConfirm from '../../components/InlineDeleteConfirm';
+import { TagList } from '../board/TagBadge';
+import TagInput from '../tasks/TagInput';
 import {
   ARTIFACT_KINDS,
   KIND_LABEL_KEYS,
   filterArtifacts,
   groupByKind,
+  allTags,
   formatSize,
   formatModified,
 } from './artifactHelpers';
+
+/** Tags arrive as a JSON array string; TagInput wants an array. */
+function parseTagsSafe(tags) {
+  if (Array.isArray(tags)) return tags;
+  try {
+    return JSON.parse(tags || '[]');
+  } catch {
+    return [];
+  }
+}
 
 export default function ArtifactsView({ projectId, project, tasks, onViewDetail }) {
   const { t } = useTranslation();
@@ -24,6 +37,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
 
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState('all');
+  const [tag, setTag] = useState(null);
 
   const [selectedId, setSelectedId] = useState(null);
   const [content, setContent] = useState('');
@@ -165,6 +179,23 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
     }
   }, [selectedId]);
 
+  // Sends the whole set rather than a diff: the editor knows what the document
+  // should be filed under, and a replacement is simpler to reason about.
+  const handleTagsChange = useCallback(
+    async (next) => {
+      if (!selectedId) return;
+      try {
+        const updated = await api.setArtifactTags(selectedId, next);
+        if (updated) {
+          setArtifacts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+        }
+      } catch (err) {
+        notifyError(err?.message || tRef.current('artifacts.tagsFailed'));
+      }
+    },
+    [selectedId],
+  );
+
   // Confirmation goes through the app's own overlay rather than window.confirm.
   // In a Tauri webview window.confirm is routed to the dialog plugin and returns a
   // promise, so `if (!window.confirm(...))` was always false — it deleted without
@@ -206,7 +237,8 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
     [tasks, onViewDetail],
   );
 
-  const filtered = useMemo(() => filterArtifacts(artifacts, { query, kind }), [artifacts, query, kind]);
+  const filtered = useMemo(() => filterArtifacts(artifacts, { query, kind, tag }), [artifacts, query, kind, tag]);
+  const tags = useMemo(() => allTags(artifacts), [artifacts]);
   const groups = useMemo(() => groupByKind(filtered), [filtered]);
   const selected = useMemo(
     () => artifacts.find((artifact) => artifact.id === selectedId) ?? null,
@@ -260,6 +292,24 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
             </button>
           ))}
         </div>
+
+        {tags.length > 0 && (
+          <div className="flex items-center gap-1 overflow-x-auto">
+            {tags.map((name) => (
+              <button
+                key={name}
+                onClick={() => setTag(tag === name ? null : name)}
+                className={`px-2 py-1 rounded-lg text-[10px] font-medium whitespace-nowrap transition-colors ${
+                  tag === name
+                    ? 'bg-blue-500/15 text-blue-300'
+                    : 'bg-surface-800 text-surface-400 hover:bg-surface-700 hover:text-surface-200'
+                }`}
+              >
+                #{name}
+              </button>
+            ))}
+          </div>
+        )}
 
         <span className="ml-auto text-[10px] text-surface-500">
           {t('artifacts.fileCount', { count: filtered.length })}
@@ -316,6 +366,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                         <span>{formatModified(artifact.updated_at)}</span>
                         <span>{formatSize(artifact.size)}</span>
                       </div>
+                      <TagList tags={artifact.tags} max={3} size="sm" />
                     </button>
                   );
                 })}
@@ -388,6 +439,15 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     {t('artifacts.delete')}
                   </button>
                 </div>
+              </div>
+
+              <div className="px-4 py-1.5 border-b border-surface-800 flex-shrink-0">
+                <TagInput
+                  value={parseTagsSafe(selected.tags)}
+                  onChange={handleTagsChange}
+                  suggestions={tags}
+                  placeholder={t('artifacts.addTag')}
+                />
               </div>
 
               {authoringTaskIds.length > 0 && (

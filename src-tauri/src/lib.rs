@@ -502,6 +502,7 @@ pub fn run() {
             commands::artifacts::remove_artifact_ref,
             commands::artifacts::task_artifacts,
             commands::artifacts::repair_artifacts,
+            commands::artifacts::set_artifact_tags,
             commands::artifacts::reveal_artifact,
         ])
         .on_menu_event(|app, event| {
