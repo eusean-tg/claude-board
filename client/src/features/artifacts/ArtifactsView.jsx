@@ -6,6 +6,7 @@ import { IS_TAURI, tauriListen } from '../../lib/tauriEvents';
 import { useTranslation } from '../../i18n/I18nProvider';
 import Spinner from '../../components/Spinner';
 import EmptyState from '../../components/EmptyState';
+import InlineDeleteConfirm from '../../components/InlineDeleteConfirm';
 import {
   ARTIFACT_KINDS,
   KIND_LABEL_KEYS,
@@ -33,6 +34,9 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  // The id awaiting confirmation, not a boolean: the overlay needs to know which
+  // document it is asking about.
+  const [confirmingDelete, setConfirmingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
 
   // `t` gets a new identity whenever the language changes. Reading it through a ref keeps it
@@ -161,9 +165,13 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
     }
   }, [selectedId]);
 
+  // Confirmation goes through the app's own overlay rather than window.confirm.
+  // In a Tauri webview window.confirm is routed to the dialog plugin and returns a
+  // promise, so `if (!window.confirm(...))` was always false — it deleted without
+  // asking, and logged an unhandled rejection while doing it.
   const handleDelete = useCallback(async () => {
     if (!selectedId) return;
-    if (!window.confirm(tRef.current('artifacts.deleteConfirm'))) return;
+    setConfirmingDelete(null);
     setDeleting(true);
     try {
       await api.deleteArtifact(selectedId);
@@ -222,7 +230,9 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
   }
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    // `relative` so the delete confirmation, which is absolute inset-0, covers
+    // this pane rather than the nearest positioned ancestor further up.
+    <div className="relative h-full flex flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-4 py-2 border-b border-surface-800 flex-shrink-0">
         <div className="relative">
@@ -369,7 +379,7 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     {copied ? t('artifacts.copied') : t('artifacts.copyPath')}
                   </button>
                   <button
-                    onClick={handleDelete}
+                    onClick={() => setConfirmingDelete(selectedId)}
                     disabled={deleting}
                     title={t('artifacts.delete')}
                     className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-800 text-surface-300 hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 text-[10px] font-medium transition-colors"
@@ -437,6 +447,14 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
           )}
         </div>
       </div>
+
+      {confirmingDelete !== null && (
+        <InlineDeleteConfirm
+          message={t('artifacts.deleteConfirm')}
+          onConfirm={handleDelete}
+          onCancel={() => setConfirmingDelete(null)}
+        />
+      )}
     </div>
   );
 }

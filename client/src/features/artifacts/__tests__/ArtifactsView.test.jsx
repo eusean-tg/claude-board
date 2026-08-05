@@ -261,7 +261,6 @@ describe('ArtifactsView render states', () => {
     listArtifacts.mockResolvedValue(ARTIFACTS);
     getArtifact.mockResolvedValue({ content: 'x' });
     deleteArtifact.mockResolvedValue(undefined);
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
@@ -269,17 +268,21 @@ describe('ArtifactsView render states', () => {
     await waitFor(() => expect(screen.getByText('artifacts.delete')).toBeTruthy());
 
     fireEvent.click(screen.getByText('artifacts.delete'));
+    // The app's own overlay, not window.confirm — which in a Tauri webview returns
+    // a promise and so never actually gated anything.
+    await waitFor(() => expect(screen.getByText('artifacts.deleteConfirm')).toBeTruthy());
+    expect(deleteArtifact).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
     await waitFor(() => expect(deleteArtifact).toHaveBeenCalledWith(11));
-    // Row gone and the selection cleared, without a refetch.
     await waitFor(() => expect(screen.queryByText('The Plan')).toBeNull());
     expect(screen.getByText('artifacts.selectPrompt')).toBeTruthy();
-    confirm.mockRestore();
   });
 
-  it('does not delete when the confirmation is declined', async () => {
+  it('does not delete when the confirmation is cancelled', async () => {
     listArtifacts.mockResolvedValue(ARTIFACTS);
     getArtifact.mockResolvedValue({ content: 'x' });
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
 
     render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
     await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
@@ -287,11 +290,13 @@ describe('ArtifactsView render states', () => {
     await waitFor(() => expect(screen.getByText('artifacts.delete')).toBeTruthy());
 
     fireEvent.click(screen.getByText('artifacts.delete'));
+    await waitFor(() => expect(screen.getByText('artifacts.deleteConfirm')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
     expect(deleteArtifact).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('artifacts.deleteConfirm')).toBeNull());
     // Still selected, so the title appears in both the row and the pane header.
     expect(screen.getAllByText('The Plan').length).toBeGreaterThan(0);
-    confirm.mockRestore();
   });
 
   it('shows one attribution chip per authoring task', async () => {
