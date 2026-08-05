@@ -195,6 +195,19 @@ pub fn build_prompt(
     parts.push("- **change_task_status** — Move tasks between statuses".into());
     parts.push("- **get_task_detail** — Get full details of any task".into());
     parts.push("- **list_task_summary** — Get a grouped summary of all tasks".into());
+    parts.push(format!(
+        "- **save_artifact** — Record a document *about the work* — a plan, RFC, spec, \
+         research notes, a progress log — so the user can read it and later tasks can \
+         reference it. Give it a real title, a kind, and tags. Pass task_id: {} for \
+         attribution. Files that belong in the codebase are not artifacts: write those \
+         to the repository as usual.",
+        task.id
+    ));
+    parts.push(
+        "- **list_artifacts** / **update_artifact** — Find documents saved earlier and \
+         revise one instead of saving a second copy of it."
+            .into(),
+    );
     parts.push(format!("Use these tools when the task description asks you to plan, break down work, or manage tasks. The current project_id is {}.", project_id));
 
     parts.push("\n## Instructions".into());

@@ -144,15 +144,14 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    fn seed_artifact(db: &DbPool, project_id: i64, task_id: i64, rel: &str) -> i64 {
-        artifacts::insert_or_replace(
+    fn seed_artifact(db: &DbPool, project_id: i64, task_id: i64, name: &str) -> i64 {
+        artifacts::create(
             db,
             project_id,
-            rel,
-            &format!("{}-1.md", rel.replace('/', "-")),
+            &format!("{}-1.md", name.replace('/', "-")),
             &DerivedMeta::default(),
-            task_id,
-            "hash",
+            "[]",
+            Some(task_id),
         )
         .unwrap()
     }

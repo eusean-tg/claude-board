@@ -1,7 +1,7 @@
 // Pure helpers for the artifacts browser. No React, no api.js — keep this unit-testable.
 //
 // An artifact is the shape returned by the `list_artifacts` command:
-// { id, project_id, stored_name, source_rel_path, title, preview, kind, size,
+// { id, project_id, stored_name, title, kind, tags, preview, size, origin,
 //   origin_task_id, last_task_id, created_at, updated_at }
 
 export const ARTIFACT_KINDS = ['all', 'plan', 'rfc', 'spec', 'readme', 'doc', 'other'];
@@ -17,7 +17,7 @@ const DAY = 24 * HOUR;
 const KB = 1024;
 const MB = KB * 1024;
 
-/** Case-insensitive substring match of `query` against the stored name, source path and title. `kind: 'all'` matches everything. */
+/** Case-insensitive substring match of `query` against the stored name, title and origin. `kind: 'all'` matches everything. */
 export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
   if (!Array.isArray(artifacts)) return [];
   const needle = String(query ?? '')
@@ -28,7 +28,7 @@ export function filterArtifacts(artifacts, { query = '', kind = 'all' } = {}) {
     if (!artifact) return false;
     if (kind !== 'all' && artifact.kind !== kind) return false;
     if (!needle) return true;
-    return [artifact.stored_name, artifact.source_rel_path, artifact.title].some(
+    return [artifact.stored_name, artifact.title, artifact.origin].some(
       (field) => typeof field === 'string' && field.toLowerCase().includes(needle),
     );
   });

@@ -218,6 +218,103 @@ server.tool(
   },
 );
 
+// ─── Artifacts ───
+//
+// The store is for documents about the work — plans, RFCs, specs, notes. Files
+// that belong to the codebase go in the repository as normal. Getting that
+// distinction wrong in either direction is the failure mode: a docs-site page
+// saved as an artifact is noise, and a plan written only into the repo is lost
+// when its branch is.
+
+server.tool(
+  'list_artifacts',
+  'List markdown documents stored for a project — plans, RFCs, specs and notes saved ' +
+    'by earlier tasks. Returns ids, titles, kinds, tags and absolute paths; read a ' +
+    "document's content with your own file tools at the path given.",
+  {
+    projectId: z.number().describe('Project ID'),
+    tag: z.string().optional().describe('Only documents carrying this tag'),
+  },
+  async ({ projectId, tag }) => {
+    const artifacts = await api(`/api/projects/${projectId}/artifacts`);
+    const wanted = tag
+      ? artifacts.filter((a) => {
+          try {
+            return JSON.parse(a.tags || '[]').includes(tag);
+          } catch {
+            return false;
+          }
+        })
+      : artifacts;
+    const text = wanted
+      .map((a) => `[${a.id}] ${a.title || a.stored_name} (${a.kind}) ${a.tags || '[]'}`)
+      .join('\n');
+    return {
+      content: [{ type: 'text', text: text || 'No documents stored for this project.' }],
+    };
+  },
+);
+
+server.tool(
+  'save_artifact',
+  'Save a markdown document to Claude Board so the user can browse it and later tasks ' +
+    'can reference it. Use this for documents about the work — a plan, an RFC, a spec, ' +
+    'research notes, a progress log. Do NOT use it for files that belong in the ' +
+    'codebase; write those to the repository as usual. Give a real title and tag the ' +
+    'document so it can be found later.',
+  {
+    projectId: z.number().describe('Project ID'),
+    title: z.string().describe('Human-readable title, e.g. "Auth rollout plan"'),
+    kind: z
+      .enum(['plan', 'rfc', 'spec', 'readme', 'doc', 'other'])
+      .describe('What kind of document this is'),
+    content: z.string().describe('The full markdown body'),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe('Tags for finding this later, e.g. ["context"] for project-wide context'),
+    taskId: z.number().optional().describe('The task saving this, for attribution'),
+  },
+  async ({ projectId, title, kind, content, tags, taskId }) => {
+    const saved = await api(`/api/projects/${projectId}/artifacts`, {
+      method: 'POST',
+      body: JSON.stringify({ title, kind, content, tags, task_id: taskId }),
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Saved artifact ${saved.id} — "${title}" (${kind}) at ${saved.path}`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'update_artifact',
+  'Revise a stored document. Pass only what changes: sending just `content` rewrites ' +
+    'the body and leaves the title, kind and tags as they are. Use this rather than ' +
+    'saving a second copy when a document already exists.',
+  {
+    id: z.number().describe('Artifact ID, from list_artifacts'),
+    content: z.string().optional().describe('Replacement markdown body'),
+    title: z.string().optional(),
+    kind: z.enum(['plan', 'rfc', 'spec', 'readme', 'doc', 'other']).optional(),
+    tags: z.array(z.string()).optional().describe('Replaces the existing tags entirely'),
+    taskId: z.number().optional().describe('The task making this change, for attribution'),
+  },
+  async ({ id, content, title, kind, tags, taskId }) => {
+    const saved = await api(`/api/artifacts/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ content, title, kind, tags, task_id: taskId }),
+    });
+    return {
+      content: [{ type: 'text', text: `Updated artifact ${saved.id} at ${saved.path}` }],
+    };
+  },
+);
+
 // ─── Start server ───
 async function main() {
   const transport = new StdioServerTransport();

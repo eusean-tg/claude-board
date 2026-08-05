@@ -36,6 +36,11 @@ pub async fn start_server(port: u16) {
         .route("/api/tasks/{id}/logs", get(task_logs))
         .route("/api/tasks/{id}/revisions", get(task_revisions))
         // Stats
+        .route(
+            "/api/projects/{pid}/artifacts",
+            get(list_artifacts).post(save_artifact),
+        )
+        .route("/api/artifacts/{id}", patch(update_artifact))
         .route("/api/projects/{pid}/stats", get(project_stats))
         .route("/api/stats/claude-usage", get(claude_usage))
         .route("/api/projects/{pid}/activity", get(project_activity))
@@ -299,4 +304,95 @@ async fn update_settings(Json(body): Json<serde_json::Value>) -> Json<serde_json
     }
     settings::update(&db, &current);
     Json(to_json(&current))
+}
+
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+
+fn artifact_data_dir() -> String {
+    db::get_data_dir().to_string_lossy().to_string()
+}
+
+async fn list_artifacts(Path(project_id): Path<i64>) -> impl IntoResponse {
+    Json(to_json(&db::artifacts::list_for_project(
+        &db::get_db(),
+        project_id,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct SaveArtifactBody {
+    title: String,
+    kind: Option<String>,
+    content: String,
+    tags: Option<Vec<String>>,
+    task_id: Option<i64>,
+}
+
+async fn save_artifact(
+    Path(project_id): Path<i64>,
+    Json(body): Json<SaveArtifactBody>,
+) -> impl IntoResponse {
+    let tags = body.tags.unwrap_or_default();
+    match super::artifact_store::save(
+        &db::get_db(),
+        &artifact_data_dir(),
+        project_id,
+        &body.title,
+        body.kind.as_deref().unwrap_or("other"),
+        &body.content,
+        &tags,
+        body.task_id,
+    ) {
+        Ok(saved) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "id": saved.id,
+                "storedName": saved.stored_name,
+                "path": saved.path,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateArtifactBody {
+    title: Option<String>,
+    kind: Option<String>,
+    content: Option<String>,
+    tags: Option<Vec<String>>,
+    task_id: Option<i64>,
+}
+
+async fn update_artifact(
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateArtifactBody>,
+) -> impl IntoResponse {
+    match super::artifact_store::revise(
+        &db::get_db(),
+        &artifact_data_dir(),
+        id,
+        body.title.as_deref(),
+        body.kind.as_deref(),
+        body.content.as_deref(),
+        body.tags.as_deref(),
+        body.task_id,
+    ) {
+        Ok(saved) => Json(serde_json::json!({
+            "id": saved.id,
+            "storedName": saved.stored_name,
+            "path": saved.path,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }

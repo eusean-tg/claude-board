@@ -27,6 +27,7 @@ import { TaskOverviewTab } from './TaskOverviewTab';
 import { TaskGitTab } from './TaskGitTab';
 import { TaskTestTab } from './TaskTestTab';
 import { TaskAttachmentsTab } from './TaskAttachmentsTab';
+import ArtifactPicker from '../artifacts/ArtifactPicker';
 import { TaskRevisionsTab } from './TaskRevisionsTab';
 import { TaskDependenciesTab } from './TaskDependenciesTab';
 
@@ -101,6 +102,7 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
     { id: 'attachments', label: t('detail.files'), icon: Paperclip, show: hasAttachments },
     { id: 'revisions', label: t('detail.revisions'), icon: RotateCcw, show: hasRevisions },
     { id: 'dependencies', label: t('detail.dependencies') || 'Dependencies', icon: Link2, always: true },
+    { id: 'documents', label: t('detail.documents'), icon: FileText, always: true },
     { id: 'replay', label: t('detail.replay'), icon: Activity, always: true },
   ].filter((tab) => tab.always || tab.show);
 
@@ -210,6 +212,13 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
                   ) : (
                     <div className="text-center text-surface-600 text-xs py-8">{t('detail.noLifecycleSummary')}</div>
                   )}
+                </div>
+              )}
+
+              {activeTab === 'documents' && (
+                <div className="p-4">
+                  <div className="text-[11px] text-surface-500 mb-2">{t('detail.documentsHint')}</div>
+                  <ArtifactPicker projectId={task.project_id} taskId={task.id} />
                 </div>
               )}
 

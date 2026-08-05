@@ -1,13 +1,9 @@
 //! Commands backing the project Artifacts tab.
 //!
-//! Artifacts are the markdown documents agents wrote, captured into the store as
-//! they were written (`crate::services::artifact_store`) and indexed in the
-//! `artifacts` table (`crate::db::artifacts`). These commands read that index and
-//! the stored copies — never the project's working directory.
-//!
-//! Editing or deleting an artifact touches only the store. The file the agent
-//! originally wrote is still in the repository, under version control, and is
-//! left alone.
+//! Artifacts are markdown documents that were deliberately saved — by an agent
+//! through `save_artifact`, or by the user. The store holds the document
+//! (`crate::services::artifact_store`) and the `artifacts` table indexes it
+//! (`crate::db::artifacts`). Nothing here reads the project's working directory.
 
 use crate::db::{self, artifacts::StoredArtifact};
 use crate::services::artifact_store;
@@ -99,18 +95,6 @@ pub fn task_artifacts(task_id: i64) -> Result<Vec<StoredArtifact>, String> {
     Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
 }
 
-/// Acknowledge that the repository has a newer version of this document.
-///
-/// Only clears the flag. The stored copy is untouched, which is the point: the
-/// edits it holds exist nowhere else, while the repository version is still in
-/// the repository under version control.
-#[tauri::command]
-pub fn dismiss_artifact_conflict(id: i64) -> Result<StoredArtifact, String> {
-    let db = db::get_db();
-    db::artifacts::clear_conflict(&db, id).map_err(|e| e.to_string())?;
-    db::artifacts::get(&db, id).ok_or_else(|| "Artifact not found".to_string())
-}
-
 /// The absolute store path of an artifact, for referencing it from a task.
 ///
 /// A path rather than the content: the agent reads the document itself, the
@@ -185,8 +169,8 @@ pub(crate) fn update_artifact_in(
     content: &str,
 ) -> Result<StoredArtifact, String> {
     let artifact = db::artifacts::get(db, id).ok_or("Artifact not found")?;
-    // An in-app edit changes the body, never the classification: the title and
-    // kind stay whatever they were given.
+    // An in-app edit changes the body, never the classification: title, kind and
+    // tags are passed as None so they keep whatever they were given.
     let meta = artifact_store::meta_for(
         artifact.title.as_deref().unwrap_or_default(),
         &artifact.kind,
@@ -194,7 +178,17 @@ pub(crate) fn update_artifact_in(
     );
 
     artifact_store::write(data_dir, &artifact.stored_name, content)?;
-    db::artifacts::update_content_meta(db, id, &meta).map_err(|e| e.to_string())?;
+    db::artifacts::update_meta(
+        db,
+        id,
+        None,
+        None,
+        None,
+        Some(&meta.preview),
+        Some(meta.size),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
 
     db::artifacts::get(db, id).ok_or_else(|| "Artifact vanished mid-update".to_string())
 }
@@ -261,22 +255,13 @@ mod tests {
     }
 
     /// Index and store a document, the way capture would.
-    fn seed(e: &Env, rel: &str, content: &str) -> i64 {
+    fn seed(e: &Env, _rel: &str, content: &str) -> i64 {
         let meta = artifact_store::meta_for("Seeded", "doc", content);
-        let name = artifact_store::unique_stored_name(&e.data_dir, rel, 1_000);
+        let name = artifact_store::unique_stored_name(&e.data_dir, "Seeded", 1_000);
         // The hash capture would have recorded, so these fixtures start
         // un-diverged.
-        let hash = artifact_store::content_hash(content);
-        let id = db::artifacts::insert_or_replace(
-            &e.db,
-            e.project_id,
-            rel,
-            &name,
-            &meta,
-            e.task_id,
-            &hash,
-        )
-        .unwrap();
+        let id = db::artifacts::create(&e.db, e.project_id, &name, &meta, "[]", Some(e.task_id))
+            .unwrap();
         artifact_store::write(&e.data_dir, &name, content).unwrap();
         id
     }

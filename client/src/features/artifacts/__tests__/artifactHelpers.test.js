@@ -13,7 +13,7 @@ const artifact = (overrides = {}) => ({
   id: 1,
   project_id: 1,
   stored_name: 'readme-1754400000.md',
-  source_rel_path: 'README.md',
+  origin: 'README.md',
   title: 'Readme',
   preview: 'hello',
   kind: 'readme',
@@ -36,18 +36,18 @@ describe('ARTIFACT_KINDS / KIND_LABEL_KEYS', () => {
 
 describe('filterArtifacts', () => {
   const artifacts = [
-    artifact({ id: 1, stored_name: 'readme-1.md', source_rel_path: 'README.md', title: 'Readme', kind: 'readme' }),
+    artifact({ id: 1, stored_name: 'readme-1.md', origin: 'README.md', title: 'Readme', kind: 'readme' }),
     artifact({
       id: 2,
       stored_name: '0001-queue-2.md',
-      source_rel_path: 'docs/rfcs/0001-queue.md',
+      origin: 'docs/rfcs/0001-queue.md',
       title: 'Queue RFC',
       kind: 'rfc',
     }),
     artifact({
       id: 3,
       stored_name: 'plan-3.md',
-      source_rel_path: '.planning/PLAN.md',
+      origin: '.planning/PLAN.md',
       title: 'Phase 3 plan',
       kind: 'plan',
     }),
@@ -78,7 +78,7 @@ describe('filterArtifacts', () => {
   });
 
   it('tolerates missing fields, null entries and non-array input', () => {
-    const ragged = [artifact({ stored_name: null, title: null, source_rel_path: 'docs/notes.md' }), null, undefined];
+    const ragged = [artifact({ stored_name: null, title: null, origin: 'docs/notes.md' }), null, undefined];
     expect(filterArtifacts(ragged, { query: 'notes' })).toHaveLength(1);
     expect(filterArtifacts(ragged, { query: 'readme' })).toEqual([]);
     expect(filterArtifacts(null)).toEqual([]);

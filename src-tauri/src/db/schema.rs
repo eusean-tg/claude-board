@@ -196,33 +196,30 @@ pub fn create_tables(conn: &Connection) {
         CREATE TABLE IF NOT EXISTS artifacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL,
-            -- Filename inside the artifact root. Generated, never taken from input.
+            -- Filename inside the artifact root. Generated from the title, never
+            -- taken from input.
             stored_name TEXT NOT NULL,
-            -- Repo-relative path the agent wrote, normalised out of the worktree so
-            -- the same document edited by two tasks stays one artifact.
-            source_rel_path TEXT NOT NULL,
+            -- Given by whoever saved the document, not guessed from its prose.
             title TEXT,
-            preview TEXT DEFAULT '',
             kind TEXT DEFAULT 'other',
+            -- JSON array, matching how tasks.tags is stored so TagList renders both.
+            tags TEXT DEFAULT '[]',
+            -- Derived from content: a display convenience, not identity.
+            preview TEXT DEFAULT '',
             size INTEGER DEFAULT 0,
+            -- Provenance only, and nullable: documents saved explicitly have no
+            -- repository path. Carries the old source_rel_path for rows that
+            -- predate explicit saves.
+            origin TEXT,
             origin_task_id INTEGER,
             last_task_id INTEGER,
-            -- SHA-256 of the content as last synced *from the repository*. Only
-            -- capture writes it. When the stored file stops matching this, the
-            -- copy has been edited in the app or by an agent through its store
-            -- path, and capture must not overwrite it.
-            captured_hash TEXT,
-            -- Set when capture found a newer repository version but declined to
-            -- overwrite a diverged copy.
-            conflict_at DATETIME,
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
             -- SET NULL, not CASCADE: deleting a task must not delete the document
             -- it produced. The document is the point.
             FOREIGN KEY (origin_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
-            FOREIGN KEY (last_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
-            UNIQUE(project_id, source_rel_path)
+            FOREIGN KEY (last_task_id) REFERENCES tasks(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS task_artifact_refs (
@@ -650,20 +647,6 @@ pub fn run_migrations(conn: &Connection) {
             "pr_provider",
             "ALTER TABLE projects ADD COLUMN pr_provider TEXT DEFAULT 'auto'",
         ),
-        // Divergence tracking for the artifact store. Added after the table, so
-        // existing installs need the columns backfilled as NULL — a NULL
-        // captured_hash reads as "never synced from the repo", which lets the
-        // first capture take ownership rather than immediately flagging.
-        (
-            "artifacts",
-            "captured_hash",
-            "ALTER TABLE artifacts ADD COLUMN captured_hash TEXT",
-        ),
-        (
-            "artifacts",
-            "conflict_at",
-            "ALTER TABLE artifacts ADD COLUMN conflict_at DATETIME",
-        ),
         // Merge a completed task's branch into the base branch. Off by default:
         // it moves the base branch and briefly switches the checkout, which is
         // not something to start doing to an existing project unasked.
@@ -972,6 +955,60 @@ pub fn run_migrations(conn: &Connection) {
     // Split the formerly-seeded defaults out of custom_models so the upstream
     // sync can own them (see services::model_catalog).
     migrate_models_v2(conn);
+
+    // Reshape the artifacts table for explicit saves: no captured_hash or
+    // conflict_at, no UNIQUE on a repository path, and a tags column.
+    migrate_artifacts_v2(conn);
+}
+
+/// Rebuild `artifacts` for explicitly-saved documents.
+///
+/// A rebuild rather than ALTER: the capture-era table carried
+/// `UNIQUE(project_id, source_rel_path)`, and SQLite cannot drop a constraint or
+/// a column that an index covers. Existing rows are preserved, with
+/// `source_rel_path` moving to the nullable `origin` column as provenance.
+pub(crate) fn migrate_artifacts_v2(conn: &Connection) {
+    // The old shape is identifiable by a column no new install has.
+    if !col_exists(conn, "artifacts", "source_rel_path") {
+        return;
+    }
+
+    let rebuilt = conn.execute_batch(
+        "
+        BEGIN;
+        CREATE TABLE artifacts_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            stored_name TEXT NOT NULL,
+            title TEXT,
+            kind TEXT DEFAULT 'other',
+            tags TEXT DEFAULT '[]',
+            preview TEXT DEFAULT '',
+            size INTEGER DEFAULT 0,
+            origin TEXT,
+            origin_task_id INTEGER,
+            last_task_id INTEGER,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (origin_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+            FOREIGN KEY (last_task_id) REFERENCES tasks(id) ON DELETE SET NULL
+        );
+        INSERT INTO artifacts_v2
+            (id, project_id, stored_name, title, kind, tags, preview, size, origin,
+             origin_task_id, last_task_id, created_at, updated_at)
+        SELECT id, project_id, stored_name, title, kind, '[]', preview, size,
+               source_rel_path, origin_task_id, last_task_id, created_at, updated_at
+          FROM artifacts;
+        DROP TABLE artifacts;
+        ALTER TABLE artifacts_v2 RENAME TO artifacts;
+        COMMIT;
+        ",
+    );
+    match rebuilt {
+        Ok(()) => log::info!("Rebuilt the artifacts table for explicit saves"),
+        Err(e) => log::error!("migrate_artifacts_v2 failed: {}", e),
+    }
 }
 
 /// Marks the model split as done so it never runs twice.

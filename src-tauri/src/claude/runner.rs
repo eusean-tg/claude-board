@@ -1670,7 +1670,7 @@ pub fn start(
                 let path =
                     crate::services::artifact_store::resolve(&data_dir, &a.stored_name).ok()?;
                 Some(crate::claude::prompt::ArtifactRef {
-                    title: a.title.clone().unwrap_or_else(|| a.source_rel_path.clone()),
+                    title: a.title.clone().unwrap_or_else(|| a.stored_name.clone()),
                     kind: a.kind.clone(),
                     path: path.to_string_lossy().to_string(),
                 })
