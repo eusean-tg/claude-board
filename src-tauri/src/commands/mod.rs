@@ -19,3 +19,4 @@ pub mod gsd;
 pub mod logs;
 pub mod git_utils;
 pub mod models;
+pub mod artifacts;
