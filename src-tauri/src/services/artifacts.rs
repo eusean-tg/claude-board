@@ -92,7 +92,11 @@ fn walk(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                log::error!("artifacts: cannot read an entry in {}: {}", dir.display(), e);
+                log::error!(
+                    "artifacts: cannot read an entry in {}: {}",
+                    dir.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -217,8 +221,8 @@ pub fn resolve(working_dir: &str, rel_path: &str) -> Result<PathBuf, String> {
 pub fn read(working_dir: &str, rel_path: &str) -> Result<ArtifactContent, String> {
     let abs_path = resolve(working_dir, rel_path)?;
 
-    let metadata = fs::metadata(&abs_path)
-        .map_err(|e| format!("cannot stat artifact {}: {}", rel_path, e))?;
+    let metadata =
+        fs::metadata(&abs_path).map_err(|e| format!("cannot stat artifact {}: {}", rel_path, e))?;
     if !metadata.is_file() {
         return Err(format!("artifact is not a file: {}", rel_path));
     }
@@ -351,7 +355,13 @@ fn front_matter_title(front_matter: &str) -> Option<String> {
     front_matter.lines().find_map(|line| {
         // Only a top-level key counts; nested keys are indented.
         let value = line.strip_prefix("title:")?.trim();
-        non_empty(value.trim_matches('"').trim_matches('\'').trim().to_string())
+        non_empty(
+            value
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string(),
+        )
     })
 }
 
@@ -401,7 +411,9 @@ fn ordered_list_marker(line: &str) -> Option<&str> {
         return None;
     }
     let rest = &line[digits..];
-    let rest = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))?;
+    let rest = rest
+        .strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))?;
     Some(rest.trim_start())
 }
 
@@ -489,8 +501,7 @@ fn is_markdown(path: &Path) -> bool {
 }
 
 fn rfc3339(time: SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(time)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -508,11 +519,8 @@ mod tests {
     /// Build a throwaway fixture tree. `suffix` keeps concurrently running tests
     /// from sharing a directory.
     fn fixture(suffix: &str, files: &[(&str, &str)]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "cb-artifacts-{}-{}",
-            std::process::id(),
-            suffix
-        ));
+        let root =
+            std::env::temp_dir().join(format!("cb-artifacts-{}-{}", std::process::id(), suffix));
         std::fs::remove_dir_all(&root).ok();
         for (rel_path, content) in files {
             let path = root.join(rel_path);
@@ -549,7 +557,11 @@ mod tests {
             "a nested markdown file is found: {:?}",
             found
         );
-        assert!(found.contains(&"plans/auth-plan.md".to_string()), "{:?}", found);
+        assert!(
+            found.contains(&"plans/auth-plan.md".to_string()),
+            "{:?}",
+            found
+        );
 
         assert!(
             !found.iter().any(|p| p.starts_with("node_modules/")),
@@ -610,13 +622,15 @@ mod tests {
 
         // Front matter supplies the title when there is no H1, and never leaks
         // into the preview.
-        let (title, preview) =
-            title_and_preview("---\ntitle: \"Introduction\"\nsidebar: 2\n---\n\nGetting started.\n");
+        let (title, preview) = title_and_preview(
+            "---\ntitle: \"Introduction\"\nsidebar: 2\n---\n\nGetting started.\n",
+        );
         assert_eq!(title.as_deref(), Some("Introduction"));
         assert_eq!(preview, "Getting started.");
 
         // An H1 wins over front matter.
-        let (title, _) = title_and_preview("---\ntitle: From Front Matter\n---\n\n# From Heading\n");
+        let (title, _) =
+            title_and_preview("---\ntitle: From Front Matter\n---\n\n# From Heading\n");
         assert_eq!(title.as_deref(), Some("From Heading"));
 
         // Bullets, rules, and sub-headings reduce to plain words.

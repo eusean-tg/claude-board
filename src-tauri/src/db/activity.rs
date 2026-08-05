@@ -1,6 +1,6 @@
+use super::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use super::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEntry {
@@ -14,7 +14,14 @@ pub struct ActivityEntry {
     pub created_at: Option<String>,
 }
 
-pub fn add(db: &DbPool, project_id: i64, task_id: Option<i64>, event_type: &str, message: &str, metadata: Option<&str>) {
+pub fn add(
+    db: &DbPool,
+    project_id: i64,
+    task_id: Option<i64>,
+    event_type: &str,
+    message: &str,
+    metadata: Option<&str>,
+) {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO activity_log (project_id,task_id,event_type,message,metadata) VALUES (?1,?2,?3,?4,?5)",
@@ -31,8 +38,11 @@ pub fn get_by_project(db: &DbPool, project_id: i64, limit: i64, offset: i64) -> 
         Err(e) => { log::error!("get_by_project: {}", e); return vec![]; }
     };
     let result = match stmt.query_map(params![project_id, limit, offset], |row| {
-        let meta_str: String = row.get::<_, String>("metadata").unwrap_or_else(|_| "{}".into());
-        let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Object(Default::default()));
+        let meta_str: String = row
+            .get::<_, String>("metadata")
+            .unwrap_or_else(|_| "{}".into());
+        let metadata = serde_json::from_str(&meta_str)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
         Ok(ActivityEntry {
             id: row.get("id")?,
             project_id: row.get("project_id")?,
@@ -45,7 +55,10 @@ pub fn get_by_project(db: &DbPool, project_id: i64, limit: i64, offset: i64) -> 
         })
     }) {
         Ok(rows) => rows.flatten().collect(),
-        Err(e) => { log::error!("get_by_project: {}", e); vec![] }
+        Err(e) => {
+            log::error!("get_by_project: {}", e);
+            vec![]
+        }
     };
     result
 }

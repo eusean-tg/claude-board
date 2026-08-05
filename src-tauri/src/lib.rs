@@ -11,11 +11,11 @@ mod paths;
 mod services;
 mod setup;
 
-use tauri::{Emitter, Manager};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemBuilder, SubmenuBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "macos")]
@@ -23,7 +23,12 @@ fn build_macos_menu(app: &tauri::App) -> Result<Menu<tauri::Wry>, Box<dyn std::e
     let app_menu = SubmenuBuilder::new(app, "Claude Board")
         .about(None)
         .separator()
-        .item(&MenuItemBuilder::new("Preferences...").accelerator("Cmd+,").id("preferences").build(app)?)
+        .item(
+            &MenuItemBuilder::new("Preferences...")
+                .accelerator("Cmd+,")
+                .id("preferences")
+                .build(app)?,
+        )
         .separator()
         .services()
         .separator()
@@ -47,7 +52,12 @@ fn build_macos_menu(app: &tauri::App) -> Result<Menu<tauri::Wry>, Box<dyn std::e
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .separator()
-        .item(&MenuItemBuilder::new("Full Screen").accelerator("Ctrl+Cmd+F").id("fullscreen").build(app)?)
+        .item(
+            &MenuItemBuilder::new("Full Screen")
+                .accelerator("Ctrl+Cmd+F")
+                .id("fullscreen")
+                .build(app)?,
+        )
         .build()?;
 
     // The real update banner needs a published release to appear, so a debug
@@ -164,7 +174,8 @@ pub fn run() {
 
                 // ─── System Tray (best-effort, don't crash if it fails) ───
                 if let Err(e) = (|| -> Result<(), Box<dyn std::error::Error>> {
-                    let show_item = MenuItem::with_id(app, "show", "Claude Board", true, None::<&str>)?;
+                    let show_item =
+                        MenuItem::with_id(app, "show", "Claude Board", true, None::<&str>)?;
                     let sep = PredefinedMenuItem::separator(app)?;
                     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
                     let tray_menu = Menu::with_items(app, &[&show_item, &sep, &quit_item])?;
@@ -172,24 +183,26 @@ pub fn run() {
                     let mut builder = TrayIconBuilder::new()
                         .tooltip("Claude Board")
                         .menu(&tray_menu)
-                        .on_menu_event(|app, event| {
-                            match event.id().as_ref() {
-                                "show" => {
-                                    if let Some(w) = app.get_webview_window("main") {
-                                        w.show().ok();
-                                        w.unminimize().ok();
-                                        w.set_focus().ok();
-                                    }
+                        .on_menu_event(|app, event| match event.id().as_ref() {
+                            "show" => {
+                                if let Some(w) = app.get_webview_window("main") {
+                                    w.show().ok();
+                                    w.unminimize().ok();
+                                    w.set_focus().ok();
                                 }
-                                "quit" => { app.exit(0); }
-                                _ => {}
                             }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
                         })
                         .on_tray_icon_event(|tray, event| {
                             if let TrayIconEvent::Click {
                                 button: MouseButton::Left,
-                                button_state: MouseButtonState::Up, ..
-                            } = event {
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
                                 let app = tray.app_handle();
                                 if let Some(w) = app.get_webview_window("main") {
                                     w.show().ok();
@@ -230,28 +243,46 @@ pub fn run() {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let updater = match app_handle.updater() {
                         Ok(u) => u,
-                        Err(e) => { log::warn!("Updater init failed: {}", e); return; }
+                        Err(e) => {
+                            log::warn!("Updater init failed: {}", e);
+                            return;
+                        }
                     };
                     match updater.check().await {
                         Ok(Some(update)) => {
                             let version = update.version.clone();
                             log::info!("Update available: {}", version);
-                            app_handle.emit("update:available", &serde_json::json!({
-                                "version": version, "status": "downloading",
-                            })).ok();
+                            app_handle
+                                .emit(
+                                    "update:available",
+                                    &serde_json::json!({
+                                        "version": version, "status": "downloading",
+                                    }),
+                                )
+                                .ok();
                             // Download and install
                             match update.download_and_install(|_, _| {}, || {}).await {
                                 Ok(_) => {
                                     log::info!("Update installed, restart required");
-                                    app_handle.emit("update:ready", &serde_json::json!({
-                                        "version": version,
-                                    })).ok();
+                                    app_handle
+                                        .emit(
+                                            "update:ready",
+                                            &serde_json::json!({
+                                                "version": version,
+                                            }),
+                                        )
+                                        .ok();
                                 }
                                 Err(e) => {
                                     log::warn!("Update install failed: {}", e);
-                                    app_handle.emit("update:available", &serde_json::json!({
-                                        "version": version, "status": "available",
-                                    })).ok();
+                                    app_handle
+                                        .emit(
+                                            "update:available",
+                                            &serde_json::json!({
+                                                "version": version, "status": "available",
+                                            }),
+                                        )
+                                        .ok();
                                 }
                             }
                         }

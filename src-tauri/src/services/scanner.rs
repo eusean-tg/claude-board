@@ -43,16 +43,11 @@ const BINARY_EXTENSIONS: &[&str] = &[
     // Images
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff", "tif", "avif",
     // Videos
-    "mp4", "avi", "mov", "mkv", "webm", "flv", "wmv",
-    // Audio
-    "mp3", "wav", "ogg", "flac", "aac", "wma",
-    // Fonts
-    "ttf", "otf", "woff", "woff2", "eot",
-    // Compiled / object
-    "exe", "dll", "so", "dylib", "o", "obj", "class", "pyc", "pyo", "wasm",
-    // Archives
-    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "jar", "war",
-    // Other binary
+    "mp4", "avi", "mov", "mkv", "webm", "flv", "wmv", // Audio
+    "mp3", "wav", "ogg", "flac", "aac", "wma", // Fonts
+    "ttf", "otf", "woff", "woff2", "eot", // Compiled / object
+    "exe", "dll", "so", "dylib", "o", "obj", "class", "pyc", "pyo", "wasm", // Archives
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "jar", "war", // Other binary
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "sqlite", "db",
 ];
 
@@ -162,8 +157,7 @@ fn simple_glob(pattern: &str, text: &str) -> bool {
             }
             if suffix.is_empty() {
                 // prefix/** — match anything starting with prefix
-                return text.starts_with(prefix)
-                    || text.starts_with(&format!("{}/", prefix));
+                return text.starts_with(prefix) || text.starts_with(&format!("{}/", prefix));
             }
             // prefix/**/suffix
             if let Some(pos) = text.find(prefix) {
@@ -172,12 +166,10 @@ fn simple_glob(pattern: &str, text: &str) -> bool {
                 return simple_glob(suffix, rest)
                     || rest.contains('/') && {
                         // try matching suffix against each sub-path
-                        rest.split('/')
-                            .enumerate()
-                            .any(|(i, _)| {
-                                let sub: String = rest.split('/').skip(i).collect::<Vec<_>>().join("/");
-                                simple_glob(suffix, &sub)
-                            })
+                        rest.split('/').enumerate().any(|(i, _)| {
+                            let sub: String = rest.split('/').skip(i).collect::<Vec<_>>().join("/");
+                            simple_glob(suffix, &sub)
+                        })
                     };
             }
             return false;
@@ -539,10 +531,22 @@ pub fn generate_file_tree(working_dir: &str, max_depth: usize) -> String {
     output.push('\n');
 
     let mut count: usize = 0;
-    build_tree(&root, &root, &gitignore, "", effective_depth, 0, &mut output, &mut count);
+    build_tree(
+        &root,
+        &root,
+        &gitignore,
+        "",
+        effective_depth,
+        0,
+        &mut output,
+        &mut count,
+    );
 
     if count >= MAX_TREE_ENTRIES {
-        output.push_str(&format!("\n... ({} entries shown, more files exist)\n", MAX_TREE_ENTRIES));
+        output.push_str(&format!(
+            "\n... ({} entries shown, more files exist)\n",
+            MAX_TREE_ENTRIES
+        ));
     }
 
     output
@@ -573,7 +577,9 @@ fn build_tree(
         let a_dir = a.path().is_dir();
         let b_dir = b.path().is_dir();
         // Directories first, then alphabetical
-        b_dir.cmp(&a_dir).then_with(|| a.file_name().cmp(&b.file_name()))
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.file_name().cmp(&b.file_name()))
     });
 
     // Filter out excluded entries
@@ -622,7 +628,11 @@ fn build_tree(
         }
 
         let is_last = i == total - 1;
-        let connector = if is_last { "\u{2514}\u{2500}\u{2500} " } else { "\u{251c}\u{2500}\u{2500} " };
+        let connector = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251c}\u{2500}\u{2500} "
+        };
         let child_prefix = if is_last { "    " } else { "\u{2502}   " };
 
         let name = entry.file_name();
@@ -639,7 +649,16 @@ fn build_tree(
 
         if path.is_dir() {
             let new_prefix = format!("{}{}", prefix, child_prefix);
-            build_tree(&path, root, gitignore, &new_prefix, max_depth, depth + 1, output, count);
+            build_tree(
+                &path,
+                root,
+                gitignore,
+                &new_prefix,
+                max_depth,
+                depth + 1,
+                output,
+                count,
+            );
         }
     }
 }

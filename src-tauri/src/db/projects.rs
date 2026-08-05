@@ -426,7 +426,17 @@ mod tests {
     fn update_stores_expanded_working_dir() {
         let db = test_db();
         let id = create(&db, "Board", "board", "/tmp/board", None, None, None, None);
-        update(&db, id, "Board", "board", "~/workspace", None, None, None, None);
+        update(
+            &db,
+            id,
+            "Board",
+            "board",
+            "~/workspace",
+            None,
+            None,
+            None,
+            None,
+        );
         let project = get_by_id(&db, id).expect("project found");
         assert_eq!(project.working_dir, format!("{}/workspace", home()));
     }
@@ -434,7 +444,16 @@ mod tests {
     #[test]
     fn absolute_working_dir_is_preserved() {
         let db = test_db();
-        let id = create(&db, "Board", "board", "/Users/x/code", None, None, None, None);
+        let id = create(
+            &db,
+            "Board",
+            "board",
+            "/Users/x/code",
+            None,
+            None,
+            None,
+            None,
+        );
         let project = get_by_id(&db, id).expect("project found");
         assert_eq!(project.working_dir, "/Users/x/code");
     }

@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn trims_surrounding_whitespace() {
-        assert_eq!(expand_tilde("  ~/workspace  "), format!("{}/workspace", home()));
+        assert_eq!(
+            expand_tilde("  ~/workspace  "),
+            format!("{}/workspace", home())
+        );
     }
 
     #[test]

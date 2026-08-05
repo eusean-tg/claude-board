@@ -11,10 +11,10 @@ use crate::db::DbPool;
 /// A model entry the UI can render.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ModelEntry {
-    pub value: String,          // canonical id passed to `claude --model`
+    pub value: String, // canonical id passed to `claude --model`
     pub label: String,
-    pub color: Option<String>,  // tailwind class fragment
-    pub source: String,         // "upstream" or "custom"
+    pub color: Option<String>, // tailwind class fragment
+    pub source: String,        // "upstream" or "custom"
     pub input_cost_per_mtok: Option<f64>,
     pub output_cost_per_mtok: Option<f64>,
     pub custom_id: Option<i64>, // present for source="custom"
@@ -280,10 +280,22 @@ mod tests {
     #[test]
     fn assigns_color_by_family() {
         let rows = derive_models(FIXTURE);
-        assert_eq!(find(&rows, "claude-opus-4-8").unwrap().color.as_deref(), Some("bg-purple-500/20 text-purple-300"));
-        assert_eq!(find(&rows, "claude-sonnet-4-6").unwrap().color.as_deref(), Some("bg-blue-500/20 text-blue-300"));
-        assert_eq!(find(&rows, "claude-haiku-4-5").unwrap().color.as_deref(), Some("bg-green-500/20 text-green-300"));
-        assert_eq!(find(&rows, "claude-fable-5").unwrap().color.as_deref(), Some("bg-amber-500/20 text-amber-300"));
+        assert_eq!(
+            find(&rows, "claude-opus-4-8").unwrap().color.as_deref(),
+            Some("bg-purple-500/20 text-purple-300")
+        );
+        assert_eq!(
+            find(&rows, "claude-sonnet-4-6").unwrap().color.as_deref(),
+            Some("bg-blue-500/20 text-blue-300")
+        );
+        assert_eq!(
+            find(&rows, "claude-haiku-4-5").unwrap().color.as_deref(),
+            Some("bg-green-500/20 text-green-300")
+        );
+        assert_eq!(
+            find(&rows, "claude-fable-5").unwrap().color.as_deref(),
+            Some("bg-amber-500/20 text-amber-300")
+        );
     }
 
     #[test]
@@ -308,7 +320,10 @@ mod tests {
         let rows = derive_models(FIXTURE);
         let big = find(&rows, "claude-opus-4-8[1m]").expect("1m variant missing");
         assert_eq!(big.label, "Opus 4.8 (1M context)");
-        assert_eq!(big.color.as_deref(), Some("bg-fuchsia-500/20 text-fuchsia-300"));
+        assert_eq!(
+            big.color.as_deref(),
+            Some("bg-fuchsia-500/20 text-fuchsia-300")
+        );
         // Upstream carries no premium-tier rate, so cost is inherited from the base model.
         let base = find(&rows, "claude-opus-4-8").unwrap();
         assert_eq!(big.input_cost_per_mtok, base.input_cost_per_mtok);
@@ -321,7 +336,10 @@ mod tests {
     fn sorts_aliases_first_then_newest_release_with_variants_adjacent() {
         let rows = derive_models(FIXTURE);
         let pos = |v: &str| rows.iter().position(|r| r.value == v).unwrap();
-        assert!(pos("opus") < pos("claude-opus-5"), "aliases must lead the list");
+        assert!(
+            pos("opus") < pos("claude-opus-5"),
+            "aliases must lead the list"
+        );
         assert_eq!(pos("claude-opus-4-8[1m]"), pos("claude-opus-4-8") + 1);
         // claude-opus-5 (2026-07-24) outranks claude-opus-4-8 (2026-05-28).
         assert!(pos("claude-opus-5") < pos("claude-opus-4-8"));
@@ -390,7 +408,14 @@ mod tests {
     fn live_upstream_fetch_succeeds() {
         let body = fetch_upstream().expect("live fetch failed");
         let rows = derive_models(&body);
-        assert!(rows.iter().any(|r| r.value == "opus"), "no opus alias in live payload");
-        assert!(rows.len() > 10, "live payload yielded only {} rows", rows.len());
+        assert!(
+            rows.iter().any(|r| r.value == "opus"),
+            "no opus alias in live payload"
+        );
+        assert!(
+            rows.len() > 10,
+            "live payload yielded only {} rows",
+            rows.len()
+        );
     }
 }

@@ -1,9 +1,11 @@
-use crate::db::{self, stats as sq, activity, projects as pq};
+use crate::db::{self, activity, projects as pq, stats as sq};
 
 #[tauri::command]
 pub fn get_project_stats(project_id: i64) -> Result<sq::ProjectStats, String> {
     let db = db::get_db();
-    if pq::get_by_id(&db, project_id).is_none() { return Err("Project not found".into()); }
+    if pq::get_by_id(&db, project_id).is_none() {
+        return Err("Project not found".into());
+    }
     Ok(sq::get_project_stats(&db, project_id))
 }
 
@@ -19,8 +21,17 @@ pub fn get_claude_usage() -> serde_json::Value {
 }
 
 #[tauri::command]
-pub fn get_activity(project_id: i64, limit: Option<i64>, offset: Option<i64>) -> Vec<activity::ActivityEntry> {
-    activity::get_by_project(&db::get_db(), project_id, limit.unwrap_or(50), offset.unwrap_or(0))
+pub fn get_activity(
+    project_id: i64,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Vec<activity::ActivityEntry> {
+    activity::get_by_project(
+        &db::get_db(),
+        project_id,
+        limit.unwrap_or(50),
+        offset.unwrap_or(0),
+    )
 }
 
 #[tauri::command]

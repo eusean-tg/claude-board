@@ -14,7 +14,9 @@ pub struct AppConfig {
     pub language: String,
 }
 
-fn default_lang() -> String { "en".into() }
+fn default_lang() -> String {
+    "en".into()
+}
 
 pub fn path(app: &tauri::App) -> PathBuf {
     app.path()
@@ -50,7 +52,10 @@ pub fn load(app: &tauri::App) -> Option<AppConfig> {
         match serde_json::from_str::<AppConfig>(&content) {
             Ok(config) => Some(config),
             Err(e) => {
-                log::warn!("Config file corrupted, backing up and using defaults: {}", e);
+                log::warn!(
+                    "Config file corrupted, backing up and using defaults: {}",
+                    e
+                );
                 let bak = p.with_extension("json.bak");
                 std::fs::rename(&p, &bak).ok();
                 Some(AppConfig::default())

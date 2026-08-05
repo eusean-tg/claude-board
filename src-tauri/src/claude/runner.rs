@@ -592,12 +592,7 @@ pub fn cleanup_task_branch(
 /// of which the agent that produced the commits can see, and none of which the
 /// user is likely to be looking at. The task log is where they would find out
 /// their work is still sitting on a branch.
-pub fn report_branch_cleanup(
-    outcome: BranchCleanup,
-    task_id: i64,
-    db: &DbPool,
-    app: &AppHandle,
-) {
+pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, app: &AppHandle) {
     if let BranchCleanup::KeptUnmerged { branch, base } = outcome {
         let msg = format!(
             "Kept branch {} — its commits are not on {} yet. Merge or push it before deleting.",
@@ -2412,7 +2407,10 @@ mod tests {
         let root = repo("merged");
         commit_on(&root, "feature/y", "y.txt");
         let dir = root.to_string_lossy();
-        assert!(git(&["merge", "--quiet", "--no-ff", "-m", "merge", "feature/y"], &root));
+        assert!(git(
+            &["merge", "--quiet", "--no-ff", "-m", "merge", "feature/y"],
+            &root
+        ));
 
         assert!(branch_is_merged_into("feature/y", "main", &dir));
 
@@ -2440,7 +2438,11 @@ mod tests {
 
         // git exits non-zero on an unresolvable ref; that must read as "keep",
         // never as "safe to delete".
-        assert!(!branch_is_merged_into("feature/w", "nonexistent-base", &dir));
+        assert!(!branch_is_merged_into(
+            "feature/w",
+            "nonexistent-base",
+            &dir
+        ));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -2451,14 +2453,23 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
 
-        assert!(!branch_is_merged_into("feature/v", "main", &root.to_string_lossy()));
+        assert!(!branch_is_merged_into(
+            "feature/v",
+            "main",
+            &root.to_string_lossy()
+        ));
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     fn branch_exists(root: &Path, branch: &str) -> bool {
         git(
-            &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", branch)],
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", branch),
+            ],
             root,
         )
     }

@@ -1,6 +1,6 @@
+use super::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use super::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -127,12 +127,19 @@ pub struct ProjectStats {
 }
 
 fn normalize_model(raw: &str) -> String {
-    if raw.is_empty() { return "unknown".to_string(); }
+    if raw.is_empty() {
+        return "unknown".to_string();
+    }
     let lower = raw.to_lowercase();
-    if lower.contains("opus") { "opus".to_string() }
-    else if lower.contains("sonnet") { "sonnet".to_string() }
-    else if lower.contains("haiku") { "haiku".to_string() }
-    else { raw.to_string() }
+    if lower.contains("opus") {
+        "opus".to_string()
+    } else if lower.contains("sonnet") {
+        "sonnet".to_string()
+    } else if lower.contains("haiku") {
+        "haiku".to_string()
+    } else {
+        raw.to_string()
+    }
 }
 
 pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
@@ -143,9 +150,17 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(by_status): {}", e); return ProjectStats { by_status: vec![], by_priority: vec![], by_type: vec![], duration: DurationStats::default(), timeline: vec![], recent_completed: vec![], claude_usage: ClaudeUsage::default(), model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(CountRow { label: r.get(0)?, count: r.get(1)? })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(CountRow {
+                label: r.get(0)?,
+                count: r.get(1)?,
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(by_status): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(by_status): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -155,9 +170,17 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(by_priority): {}", e); return ProjectStats { by_status, by_priority: vec![], by_type: vec![], duration: DurationStats::default(), timeline: vec![], recent_completed: vec![], claude_usage: ClaudeUsage::default(), model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(CountRow { label: format!("{}", r.get::<_, i64>(0)?), count: r.get(1)? })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(CountRow {
+                label: format!("{}", r.get::<_, i64>(0)?),
+                count: r.get(1)?,
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(by_priority): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(by_priority): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -167,9 +190,17 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(by_type): {}", e); return ProjectStats { by_status, by_priority, by_type: vec![], duration: DurationStats::default(), timeline: vec![], recent_completed: vec![], claude_usage: ClaudeUsage::default(), model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(CountRow { label: r.get(0)?, count: r.get(1)? })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(CountRow {
+                label: r.get(0)?,
+                count: r.get(1)?,
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(by_type): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(by_type): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -197,9 +228,17 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(timeline): {}", e); return ProjectStats { by_status, by_priority, by_type, duration, timeline: vec![], recent_completed: vec![], claude_usage: ClaudeUsage::default(), model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(TimelinePoint { day: r.get(0)?, count: r.get(1)? })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(TimelinePoint {
+                day: r.get(0)?,
+                count: r.get(1)?,
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(timeline): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(timeline): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -211,15 +250,32 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(recent_completed): {}", e); return ProjectStats { by_status, by_priority, by_type, duration, timeline, recent_completed: vec![], claude_usage: ClaudeUsage::default(), model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(RecentCompleted {
-            id: r.get(0)?, title: r.get(1)?, task_type: r.get(2)?, priority: r.get(3)?,
-            model: r.get(4)?, model_used: r.get(5)?, input_tokens: r.get(6)?, output_tokens: r.get(7)?,
-            cache_read_tokens: r.get(8)?, cache_creation_tokens: r.get(9)?, total_cost: r.get(10)?,
-            num_turns: r.get(11)?, rate_limit_hits: r.get(12)?, started_at: r.get(13)?,
-            completed_at: r.get(14)?, work_duration_ms: r.get(15)?, duration_minutes: r.get(16)?,
-        })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(RecentCompleted {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                task_type: r.get(2)?,
+                priority: r.get(3)?,
+                model: r.get(4)?,
+                model_used: r.get(5)?,
+                input_tokens: r.get(6)?,
+                output_tokens: r.get(7)?,
+                cache_read_tokens: r.get(8)?,
+                cache_creation_tokens: r.get(9)?,
+                total_cost: r.get(10)?,
+                num_turns: r.get(11)?,
+                rate_limit_hits: r.get(12)?,
+                started_at: r.get(13)?,
+                completed_at: r.get(14)?,
+                work_duration_ms: r.get(15)?,
+                duration_minutes: r.get(16)?,
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(recent_completed): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(recent_completed): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -243,12 +299,19 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
             Ok(s) => s,
             Err(e) => { log::error!("get_project_stats(model_breakdown): {}", e); return ProjectStats { by_status, by_priority, by_type, duration, timeline, recent_completed, claude_usage, model_breakdown: vec![] }; }
         };
-        let result = match s.query_map(params![pid], |r| Ok(ModelBreakdown {
-            model_name: r.get(0)?, count: r.get(1)?,
-            total_tokens: r.get(2).ok(), total_cost: r.get(3).ok(),
-        })) {
+        let result = match s.query_map(params![pid], |r| {
+            Ok(ModelBreakdown {
+                model_name: r.get(0)?,
+                count: r.get(1)?,
+                total_tokens: r.get(2).ok(),
+                total_cost: r.get(3).ok(),
+            })
+        }) {
             Ok(rows) => rows.flatten().collect(),
-            Err(e) => { log::error!("get_project_stats(model_breakdown): {}", e); vec![] }
+            Err(e) => {
+                log::error!("get_project_stats(model_breakdown): {}", e);
+                vec![]
+            }
         };
         result
     };
@@ -256,7 +319,16 @@ pub fn get_project_stats(db: &DbPool, pid: i64) -> ProjectStats {
     // Merge model rows by normalized name
     let model_breakdown = merge_model_breakdown(raw_breakdown);
 
-    ProjectStats { by_status, by_priority, by_type, duration, timeline, recent_completed, claude_usage, model_breakdown }
+    ProjectStats {
+        by_status,
+        by_priority,
+        by_type,
+        duration,
+        timeline,
+        recent_completed,
+        claude_usage,
+        model_breakdown,
+    }
 }
 
 fn merge_model_breakdown(rows: Vec<ModelBreakdown>) -> Vec<ModelBreakdown> {
@@ -264,11 +336,18 @@ fn merge_model_breakdown(rows: Vec<ModelBreakdown>) -> Vec<ModelBreakdown> {
     for row in rows {
         let name = normalize_model(&row.model_name);
         let entry = map.entry(name.clone()).or_insert(ModelBreakdown {
-            model_name: name, count: 0, total_tokens: Some(0), total_cost: Some(0.0),
+            model_name: name,
+            count: 0,
+            total_tokens: Some(0),
+            total_cost: Some(0.0),
         });
         entry.count += row.count;
-        if let Some(t) = entry.total_tokens.as_mut() { *t += row.total_tokens.unwrap_or(0); }
-        if let Some(c) = entry.total_cost.as_mut() { *c += row.total_cost.unwrap_or(0.0); }
+        if let Some(t) = entry.total_tokens.as_mut() {
+            *t += row.total_tokens.unwrap_or(0);
+        }
+        if let Some(c) = entry.total_cost.as_mut() {
+            *c += row.total_cost.unwrap_or(0.0);
+        }
     }
     map.into_values().collect()
 }
@@ -279,13 +358,20 @@ pub fn get_global_usage(db: &DbPool) -> GlobalUsage {
         Ok(s) => s,
         Err(e) => { log::error!("get_global_usage: {}", e); return GlobalUsage::default(); }
     };
-    stmt.query_row([], |r| Ok(GlobalUsage {
-            input_tokens: r.get(0).ok(), output_tokens: r.get(1).ok(),
-            cache_read: r.get(2).ok(), cache_creation: r.get(3).ok(),
-            total_cost: r.get(4).ok(), total_turns: r.get(5).ok(),
-            rate_limit_hits: r.get(6).ok(), tasks_with_usage: r.get(7).ok(),
+    stmt.query_row([], |r| {
+        Ok(GlobalUsage {
+            input_tokens: r.get(0).ok(),
+            output_tokens: r.get(1).ok(),
+            cache_read: r.get(2).ok(),
+            cache_creation: r.get(3).ok(),
+            total_cost: r.get(4).ok(),
+            total_turns: r.get(5).ok(),
+            rate_limit_hits: r.get(6).ok(),
+            tasks_with_usage: r.get(7).ok(),
             total_tasks: r.get(8).ok(),
-        })).unwrap_or_default()
+        })
+    })
+    .unwrap_or_default()
 }
 
 pub fn get_global_model_breakdown(db: &DbPool) -> Vec<GlobalModelRow> {
@@ -296,25 +382,44 @@ pub fn get_global_model_breakdown(db: &DbPool) -> Vec<GlobalModelRow> {
         Ok(s) => s,
         Err(e) => { log::error!("get_global_model_breakdown: {}", e); return vec![]; }
     };
-    let raw: Vec<GlobalModelRow> = match stmt.query_map([], |r| Ok(GlobalModelRow {
-        model: r.get(0)?, tasks: r.get(1)?,
-        input_tokens: r.get(2).ok(), output_tokens: r.get(3).ok(), cost: r.get(4).ok(),
-    })) {
+    let raw: Vec<GlobalModelRow> = match stmt.query_map([], |r| {
+        Ok(GlobalModelRow {
+            model: r.get(0)?,
+            tasks: r.get(1)?,
+            input_tokens: r.get(2).ok(),
+            output_tokens: r.get(3).ok(),
+            cost: r.get(4).ok(),
+        })
+    }) {
         Ok(rows) => rows.flatten().collect(),
-        Err(e) => { log::error!("get_global_model_breakdown: {}", e); return vec![]; }
+        Err(e) => {
+            log::error!("get_global_model_breakdown: {}", e);
+            return vec![];
+        }
     };
 
     // Merge by normalized name
-    let mut map: std::collections::HashMap<String, GlobalModelRow> = std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, GlobalModelRow> =
+        std::collections::HashMap::new();
     for row in raw {
         let name = normalize_model(&row.model);
         let entry = map.entry(name.clone()).or_insert(GlobalModelRow {
-            model: name, tasks: 0, input_tokens: Some(0), output_tokens: Some(0), cost: Some(0.0),
+            model: name,
+            tasks: 0,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cost: Some(0.0),
         });
         entry.tasks += row.tasks;
-        if let Some(t) = entry.input_tokens.as_mut() { *t += row.input_tokens.unwrap_or(0); }
-        if let Some(t) = entry.output_tokens.as_mut() { *t += row.output_tokens.unwrap_or(0); }
-        if let Some(c) = entry.cost.as_mut() { *c += row.cost.unwrap_or(0.0); }
+        if let Some(t) = entry.input_tokens.as_mut() {
+            *t += row.input_tokens.unwrap_or(0);
+        }
+        if let Some(t) = entry.output_tokens.as_mut() {
+            *t += row.output_tokens.unwrap_or(0);
+        }
+        if let Some(c) = entry.cost.as_mut() {
+            *c += row.cost.unwrap_or(0.0);
+        }
     }
     map.into_values().collect()
 }
@@ -323,20 +428,42 @@ pub fn get_claude_limits(db: &DbPool) -> Option<ClaudeLimits> {
     let conn = db.lock();
     let mut stmt = match conn.prepare("SELECT * FROM claude_limits WHERE id=1") {
         Ok(s) => s,
-        Err(e) => { log::error!("get_claude_limits: {}", e); return None; }
+        Err(e) => {
+            log::error!("get_claude_limits: {}", e);
+            return None;
+        }
     };
-    stmt.query_row([], |r| Ok(ClaudeLimits {
-            id: r.get("id").ok(), rate_limit_type: r.get("rate_limit_type").ok(),
-            status: r.get("status").ok(), resets_at: r.get("resets_at").ok(),
-            overage_status: r.get("overage_status").ok(), is_using_overage: r.get("is_using_overage").ok(),
-            last_model: r.get("last_model").ok(), last_cost_usd: r.get("last_cost_usd").ok(),
-            context_window: r.get("context_window").ok(), max_output_tokens: r.get("max_output_tokens").ok(),
+    stmt.query_row([], |r| {
+        Ok(ClaudeLimits {
+            id: r.get("id").ok(),
+            rate_limit_type: r.get("rate_limit_type").ok(),
+            status: r.get("status").ok(),
+            resets_at: r.get("resets_at").ok(),
+            overage_status: r.get("overage_status").ok(),
+            is_using_overage: r.get("is_using_overage").ok(),
+            last_model: r.get("last_model").ok(),
+            last_cost_usd: r.get("last_cost_usd").ok(),
+            context_window: r.get("context_window").ok(),
+            max_output_tokens: r.get("max_output_tokens").ok(),
             updated_at: r.get("updated_at").ok(),
-        })).ok()
+        })
+    })
+    .ok()
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn upsert_claude_limits(db: &DbPool, rate_limit_type: &str, status: &str, resets_at: i64, overage_status: &str, is_using_overage: bool, model: &str, cost_usd: f64, context_window: i64, max_output_tokens: i64) {
+pub fn upsert_claude_limits(
+    db: &DbPool,
+    rate_limit_type: &str,
+    status: &str,
+    resets_at: i64,
+    overage_status: &str,
+    is_using_overage: bool,
+    model: &str,
+    cost_usd: f64,
+    context_window: i64,
+    max_output_tokens: i64,
+) {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO claude_limits (id,rate_limit_type,status,resets_at,overage_status,is_using_overage,last_model,last_cost_usd,context_window,max_output_tokens,updated_at) VALUES (1,?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now','localtime')) ON CONFLICT(id) DO UPDATE SET rate_limit_type=excluded.rate_limit_type, status=excluded.status, resets_at=excluded.resets_at, overage_status=excluded.overage_status, is_using_overage=excluded.is_using_overage, last_model=excluded.last_model, last_cost_usd=excluded.last_cost_usd, context_window=excluded.context_window, max_output_tokens=excluded.max_output_tokens, updated_at=excluded.updated_at",
@@ -352,11 +479,19 @@ pub fn get_usage_timeline(db: &DbPool) -> Vec<UsageTimelinePoint> {
         Ok(s) => s,
         Err(e) => { log::error!("get_usage_timeline: {}", e); return vec![]; }
     };
-    let result = match stmt.query_map([], |r| Ok(UsageTimelinePoint {
-        day: r.get(0)?, tokens: r.get(1).ok(), cost: r.get(2).ok(), tasks: r.get(3)?,
-    })) {
+    let result = match stmt.query_map([], |r| {
+        Ok(UsageTimelinePoint {
+            day: r.get(0)?,
+            tokens: r.get(1).ok(),
+            cost: r.get(2).ok(),
+            tasks: r.get(3)?,
+        })
+    }) {
         Ok(rows) => rows.flatten().collect(),
-        Err(e) => { log::error!("get_usage_timeline: {}", e); vec![] }
+        Err(e) => {
+            log::error!("get_usage_timeline: {}", e);
+            vec![]
+        }
     };
     result
 }

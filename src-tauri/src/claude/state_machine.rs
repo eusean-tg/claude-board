@@ -103,7 +103,7 @@ pub fn is_valid_transition(from: TaskStatus, to: TaskStatus) -> bool {
         | (Failed, Backlog)         // user retries from failure
         | (Failed, InProgress)      // user directly restarts
         | (Done, Backlog)           // user reopens
-        | (Done, InProgress)        // user reopens and restarts
+        | (Done, InProgress) // user reopens and restarts
     )
 }
 
@@ -139,13 +139,26 @@ impl EngineConfig {
     /// Build config from project settings, falling back to defaults.
     pub fn from_project(project: &crate::db::projects::Project) -> Self {
         Self {
-            max_auto_revisions: Self::resolve(project.max_auto_revisions, Self::DEFAULT_MAX_AUTO_REVISIONS),
+            max_auto_revisions: Self::resolve(
+                project.max_auto_revisions,
+                Self::DEFAULT_MAX_AUTO_REVISIONS,
+            ),
             max_retries: Self::resolve(project.max_retries, Self::DEFAULT_MAX_RETRIES),
-            retry_base_delay_secs: Self::resolve(project.retry_base_delay_secs, Self::DEFAULT_RETRY_BASE_DELAY),
-            retry_max_delay_secs: Self::resolve(project.retry_max_delay_secs, Self::DEFAULT_RETRY_MAX_DELAY),
+            retry_base_delay_secs: Self::resolve(
+                project.retry_base_delay_secs,
+                Self::DEFAULT_RETRY_BASE_DELAY,
+            ),
+            retry_max_delay_secs: Self::resolve(
+                project.retry_max_delay_secs,
+                Self::DEFAULT_RETRY_MAX_DELAY,
+            ),
             auto_test_model: {
                 let v = project.auto_test_model.as_deref().unwrap_or("");
-                if v.is_empty() { Self::DEFAULT_AUTO_TEST_MODEL.to_string() } else { v.to_string() }
+                if v.is_empty() {
+                    Self::DEFAULT_AUTO_TEST_MODEL.to_string()
+                } else {
+                    v.to_string()
+                }
             },
         }
     }
@@ -176,7 +189,14 @@ mod tests {
 
     #[test]
     fn test_status_roundtrip() {
-        for s in ["backlog", "in_progress", "testing", "done", "failed", "awaiting_approval"] {
+        for s in [
+            "backlog",
+            "in_progress",
+            "testing",
+            "done",
+            "failed",
+            "awaiting_approval",
+        ] {
             let status = TaskStatus::from_str(s).unwrap();
             assert_eq!(status.as_str(), s);
         }

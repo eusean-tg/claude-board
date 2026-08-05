@@ -1146,7 +1146,9 @@ mod model_migration_tests {
         let conn = Connection::open_in_memory().unwrap();
         create_tables(&conn);
         for (i, (model_id, label, color, input, output)) in
-            crate::commands::models::default_seed_models().iter().enumerate()
+            crate::commands::models::default_seed_models()
+                .iter()
+                .enumerate()
         {
             conn.execute(
                 "INSERT INTO custom_models (model_id, label, color, input_cost_per_mtok, output_cost_per_mtok, sort_order)
@@ -1157,7 +1159,8 @@ mod model_migration_tests {
         conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('models_seeded','true')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn
     }
 
@@ -1178,17 +1181,31 @@ mod model_migration_tests {
     #[test]
     fn keeps_a_default_the_user_edited() {
         let conn = seeded_db();
-        conn.execute("UPDATE custom_models SET label='My Opus' WHERE model_id='opus'", []).unwrap();
+        conn.execute(
+            "UPDATE custom_models SET label='My Opus' WHERE model_id='opus'",
+            [],
+        )
+        .unwrap();
         migrate_models_v2(&conn);
-        assert_eq!(ids(&conn, "SELECT model_id FROM custom_models"), vec!["opus"]);
+        assert_eq!(
+            ids(&conn, "SELECT model_id FROM custom_models"),
+            vec!["opus"]
+        );
     }
 
     #[test]
     fn keeps_a_default_whose_cost_the_user_changed() {
         let conn = seeded_db();
-        conn.execute("UPDATE custom_models SET input_cost_per_mtok=99.0 WHERE model_id='sonnet'", []).unwrap();
+        conn.execute(
+            "UPDATE custom_models SET input_cost_per_mtok=99.0 WHERE model_id='sonnet'",
+            [],
+        )
+        .unwrap();
         migrate_models_v2(&conn);
-        assert_eq!(ids(&conn, "SELECT model_id FROM custom_models"), vec!["sonnet"]);
+        assert_eq!(
+            ids(&conn, "SELECT model_id FROM custom_models"),
+            vec!["sonnet"]
+        );
     }
 
     #[test]
@@ -1197,17 +1214,28 @@ mod model_migration_tests {
         conn.execute(
             "INSERT INTO custom_models (model_id, label) VALUES ('my-local-model','Local')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         migrate_models_v2(&conn);
-        assert_eq!(ids(&conn, "SELECT model_id FROM custom_models"), vec!["my-local-model"]);
+        assert_eq!(
+            ids(&conn, "SELECT model_id FROM custom_models"),
+            vec!["my-local-model"]
+        );
     }
 
     #[test]
     fn tombstones_defaults_the_user_deleted() {
         let conn = seeded_db();
-        conn.execute("DELETE FROM custom_models WHERE model_id='claude-opus-4-6'", []).unwrap();
+        conn.execute(
+            "DELETE FROM custom_models WHERE model_id='claude-opus-4-6'",
+            [],
+        )
+        .unwrap();
         migrate_models_v2(&conn);
-        assert_eq!(ids(&conn, "SELECT model_id FROM model_tombstones"), vec!["claude-opus-4-6"]);
+        assert_eq!(
+            ids(&conn, "SELECT model_id FROM model_tombstones"),
+            vec!["claude-opus-4-6"]
+        );
     }
 
     #[test]
@@ -1217,9 +1245,13 @@ mod model_migration_tests {
         conn.execute(
             "INSERT INTO custom_models (model_id, label) VALUES ('opus','Re-added by user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         migrate_models_v2(&conn);
-        assert_eq!(ids(&conn, "SELECT model_id FROM custom_models"), vec!["opus"]);
+        assert_eq!(
+            ids(&conn, "SELECT model_id FROM custom_models"),
+            vec!["opus"]
+        );
     }
 
     #[test]

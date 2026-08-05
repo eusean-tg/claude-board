@@ -1,5 +1,5 @@
-use tauri::{AppHandle, Emitter};
 use crate::db::{self, webhooks as wq};
+use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
 pub fn get_webhooks(project_id: i64) -> Vec<wq::Webhook> {
@@ -8,11 +8,22 @@ pub fn get_webhooks(project_id: i64) -> Vec<wq::Webhook> {
 
 #[tauri::command]
 pub fn create_webhook(
-    app: AppHandle, project_id: i64,
-    name: String, url: String, platform: Option<String>, events: Option<Vec<String>>,
+    app: AppHandle,
+    project_id: i64,
+    name: String,
+    url: String,
+    platform: Option<String>,
+    events: Option<Vec<String>>,
 ) -> Result<wq::Webhook, String> {
     let db = db::get_db();
-    let id = wq::create(&db, project_id, &name, &url, platform.as_deref(), &events.unwrap_or_default());
+    let id = wq::create(
+        &db,
+        project_id,
+        &name,
+        &url,
+        platform.as_deref(),
+        &events.unwrap_or_default(),
+    );
     let w = wq::get_by_id(&db, id).ok_or("Webhook not found")?;
     app.emit("webhook:created", &w).ok();
     Ok(w)
@@ -20,12 +31,24 @@ pub fn create_webhook(
 
 #[tauri::command]
 pub fn update_webhook(
-    app: AppHandle, id: i64,
-    name: String, url: String, platform: Option<String>,
-    events: Option<Vec<String>>, enabled: Option<bool>,
+    app: AppHandle,
+    id: i64,
+    name: String,
+    url: String,
+    platform: Option<String>,
+    events: Option<Vec<String>>,
+    enabled: Option<bool>,
 ) -> Result<wq::Webhook, String> {
     let db = db::get_db();
-    wq::update(&db, id, &name, &url, platform.as_deref(), &events.unwrap_or_default(), enabled.unwrap_or(true));
+    wq::update(
+        &db,
+        id,
+        &name,
+        &url,
+        platform.as_deref(),
+        &events.unwrap_or_default(),
+        enabled.unwrap_or(true),
+    );
     let w = wq::get_by_id(&db, id).ok_or("Webhook not found")?;
     app.emit("webhook:updated", &w).ok();
     Ok(w)
@@ -34,7 +57,8 @@ pub fn update_webhook(
 #[tauri::command]
 pub fn delete_webhook(app: AppHandle, id: i64) {
     wq::delete(&db::get_db(), id);
-    app.emit("webhook:deleted", &serde_json::json!({"id": id})).ok();
+    app.emit("webhook:deleted", &serde_json::json!({"id": id}))
+        .ok();
 }
 
 #[tauri::command]
@@ -47,10 +71,12 @@ pub async fn test_webhook(id: i64) -> Result<String, String> {
         "timestamp": chrono::Local::now().to_rfc3339(),
     });
     let client = reqwest::Client::new();
-    let res = client.post(&webhook.url)
+    let res = client
+        .post(&webhook.url)
         .json(&payload)
         .timeout(std::time::Duration::from_secs(10))
-        .send().await
+        .send()
+        .await
         .map_err(|e| e.to_string())?;
     Ok(format!("Status: {}", res.status()))
 }

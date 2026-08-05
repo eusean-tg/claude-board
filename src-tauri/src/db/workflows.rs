@@ -1,6 +1,6 @@
+use super::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use super::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowTemplate {
@@ -20,7 +20,7 @@ pub struct WorkflowStep {
     pub task_type: Option<String>,
     pub model: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub depends_on_steps: Vec<usize>, // indices into steps array
+    pub depends_on_steps: Vec<usize>,   // indices into steps array
     pub condition_type: Option<String>, // always, on_success, on_failure, on_any
 }
 
@@ -44,7 +44,10 @@ pub fn get_by_project(db: &DbPool, project_id: i64) -> Vec<WorkflowTemplate> {
         })
     }) {
         Ok(rows) => rows.flatten().collect(),
-        Err(e) => { log::error!("workflows get_by_project query: {}", e); vec![] }
+        Err(e) => {
+            log::error!("workflows get_by_project query: {}", e);
+            vec![]
+        }
     };
     result
 }
@@ -67,7 +70,8 @@ pub fn get_by_id(db: &DbPool, id: i64) -> Option<WorkflowTemplate> {
             created_at: r.get(5)?,
             updated_at: r.get(6)?,
         })
-    }).ok()
+    })
+    .ok()
 }
 
 pub fn create(db: &DbPool, project_id: i64, name: &str, description: &str, steps: &str) -> i64 {
@@ -89,5 +93,6 @@ pub fn update(db: &DbPool, id: i64, name: &str, description: &str, steps: &str) 
 
 pub fn delete(db: &DbPool, id: i64) {
     let conn = db.lock();
-    conn.execute("DELETE FROM workflow_templates WHERE id=?1", params![id]).ok();
+    conn.execute("DELETE FROM workflow_templates WHERE id=?1", params![id])
+        .ok();
 }

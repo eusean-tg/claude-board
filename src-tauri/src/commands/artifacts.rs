@@ -32,7 +32,8 @@ pub async fn list_artifacts(project_id: i64) -> Result<Vec<ArtifactWithTasks>, S
     let (working_dir, writes) = {
         let db = db::get_db();
         let project = projects::get_by_id(&db, project_id).ok_or("Project not found")?;
-        let writes = db::artifacts::markdown_writes_by_project(&db, project_id, &project.working_dir);
+        let writes =
+            db::artifacts::markdown_writes_by_project(&db, project_id, &project.working_dir);
         (project.working_dir, writes)
     };
 
@@ -56,7 +57,10 @@ pub async fn list_artifacts(project_id: i64) -> Result<Vec<ArtifactWithTasks>, S
 
 /// Read one artifact's full contents.
 #[tauri::command]
-pub fn get_artifact(project_id: i64, rel_path: String) -> Result<artifacts::ArtifactContent, String> {
+pub fn get_artifact(
+    project_id: i64,
+    rel_path: String,
+) -> Result<artifacts::ArtifactContent, String> {
     let db = db::get_db();
     let project = projects::get_by_id(&db, project_id).ok_or("Project not found")?;
     artifacts::read(&project.working_dir, &rel_path)

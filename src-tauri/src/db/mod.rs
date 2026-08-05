@@ -1,22 +1,22 @@
-pub mod schema;
-pub mod tasks;
-pub mod projects;
-pub mod stats;
 pub mod activity;
-pub mod snippets;
-pub mod templates;
-pub mod attachments;
-pub mod webhooks;
-pub mod roles;
-pub mod auth;
-pub mod dependencies;
-pub mod scans;
-pub mod settings;
-pub mod workflows;
-pub mod roadmap;
-pub mod custom_models;
-pub mod model_catalog;
 pub mod artifacts;
+pub mod attachments;
+pub mod auth;
+pub mod custom_models;
+pub mod dependencies;
+pub mod model_catalog;
+pub mod projects;
+pub mod roadmap;
+pub mod roles;
+pub mod scans;
+pub mod schema;
+pub mod settings;
+pub mod snippets;
+pub mod stats;
+pub mod tasks;
+pub mod templates;
+pub mod webhooks;
+pub mod workflows;
 
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
@@ -45,8 +45,10 @@ pub fn init_db(data_dir: &str) -> Result<DbPool, String> {
 
     let conn = Connection::open(&db_path)
         .map_err(|e| format!("Failed to open database at {:?}: {}", db_path, e))?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
-        .map_err(|e| format!("Failed to set PRAGMA: {}", e))?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+    )
+    .map_err(|e| format!("Failed to set PRAGMA: {}", e))?;
 
     schema::create_tables(&conn);
     schema::run_migrations(&conn);
@@ -71,10 +73,12 @@ where
     F: FnOnce(&Connection) -> Result<T, String>,
 {
     let conn = db.lock();
-    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| format!("begin: {}", e))?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin: {}", e))?;
     match f(&conn) {
         Ok(result) => {
-            conn.execute_batch("COMMIT").map_err(|e| format!("commit: {}", e))?;
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {}", e))?;
             Ok(result)
         }
         Err(e) => {

@@ -1,5 +1,5 @@
-use std::process::Stdio;
 use serde_json::Value;
+use std::process::Stdio;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -7,7 +7,9 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn strip_ansi(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9]*[a-zA-Z]").unwrap();
+    let re =
+        regex_lite::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[\?[0-9]*[a-zA-Z]")
+            .unwrap();
     re.replace_all(s, "").trim().to_string()
 }
 
@@ -21,14 +23,22 @@ fn run_claude_sync(args: Vec<String>) -> Result<String, String> {
         .env("TERM", "dumb");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output().map_err(|e| format!("Failed to run claude: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run claude: {}", e))?;
     let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
     let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
     if output.status.success() {
         Ok(stdout)
     } else {
-        if !stdout.is_empty() { return Ok(stdout); }
-        Err(if stderr.is_empty() { "Command failed".into() } else { stderr })
+        if !stdout.is_empty() {
+            return Ok(stdout);
+        }
+        Err(if stderr.is_empty() {
+            "Command failed".into()
+        } else {
+            stderr
+        })
     }
 }
 
@@ -47,13 +57,17 @@ fn parse_mcp_list(out: &str) -> Value {
     let mut servers = Vec::new();
     for line in out.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("Checking") { continue; }
+        if line.is_empty() || line.starts_with("Checking") {
+            continue;
+        }
         if let Some(colon_pos) = line.find(": ") {
             let name = line[..colon_pos].trim();
             let rest = &line[colon_pos + 2..];
             let (detail, status) = if let Some(dash_pos) = rest.rfind(" - ") {
                 (rest[..dash_pos].trim(), rest[dash_pos + 3..].trim())
-            } else { (rest.trim(), "") };
+            } else {
+                (rest.trim(), "")
+            };
             servers.push(serde_json::json!({
                 "name": name, "detail": detail, "status": status,
                 "connected": status.contains("Connected") || status.contains("✓"),
@@ -69,18 +83,27 @@ fn parse_plugin_list(out: &str) -> Value {
     for line in out.lines() {
         let line = line.trim();
         if line.starts_with('❯') || line.starts_with('>') {
-            if let Some(p) = current.take() { plugins.push(Value::Object(p)); }
+            if let Some(p) = current.take() {
+                plugins.push(Value::Object(p));
+            }
             let name = line.trim_start_matches(['❯', '>', ' '].as_ref()).trim();
             let mut map = serde_json::Map::new();
             map.insert("name".into(), Value::String(name.to_string()));
             current = Some(map);
         } else if let Some(ref mut map) = current {
-            if let Some(v) = line.strip_prefix("Version:") { map.insert("version".into(), Value::String(v.trim().into())); }
-            else if let Some(v) = line.strip_prefix("Scope:") { map.insert("scope".into(), Value::String(v.trim().into())); }
-            else if let Some(v) = line.strip_prefix("Status:") { map.insert("status".into(), Value::String(v.trim().into())); map.insert("enabled".into(), Value::Bool(v.contains("enabled"))); }
+            if let Some(v) = line.strip_prefix("Version:") {
+                map.insert("version".into(), Value::String(v.trim().into()));
+            } else if let Some(v) = line.strip_prefix("Scope:") {
+                map.insert("scope".into(), Value::String(v.trim().into()));
+            } else if let Some(v) = line.strip_prefix("Status:") {
+                map.insert("status".into(), Value::String(v.trim().into()));
+                map.insert("enabled".into(), Value::Bool(v.contains("enabled")));
+            }
         }
     }
-    if let Some(p) = current.take() { plugins.push(Value::Object(p)); }
+    if let Some(p) = current.take() {
+        plugins.push(Value::Object(p));
+    }
     Value::Array(plugins)
 }
 
@@ -90,16 +113,22 @@ fn parse_marketplace_list(out: &str) -> Value {
     for line in out.lines() {
         let line = line.trim();
         if line.starts_with('❯') || line.starts_with('>') {
-            if let Some(m) = current.take() { list.push(Value::Object(m)); }
+            if let Some(m) = current.take() {
+                list.push(Value::Object(m));
+            }
             let name = line.trim_start_matches(['❯', '>', ' '].as_ref()).trim();
             let mut map = serde_json::Map::new();
             map.insert("name".into(), Value::String(name.to_string()));
             current = Some(map);
         } else if let Some(ref mut map) = current {
-            if let Some(v) = line.strip_prefix("Source:") { map.insert("source".into(), Value::String(v.trim().into())); }
+            if let Some(v) = line.strip_prefix("Source:") {
+                map.insert("source".into(), Value::String(v.trim().into()));
+            }
         }
     }
-    if let Some(m) = current.take() { list.push(Value::Object(m)); }
+    if let Some(m) = current.take() {
+        list.push(Value::Object(m));
+    }
     Value::Array(list)
 }
 
@@ -112,7 +141,10 @@ fn split_front_matter(content: &str) -> (&str, &str) {
     match rest.find("\n---") {
         Some(end) => {
             let body = &rest[end + 4..];
-            let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+            let body = body
+                .strip_prefix("\r\n")
+                .or_else(|| body.strip_prefix('\n'))
+                .unwrap_or(body);
             (&rest[..end], body)
         }
         None => ("", content),
@@ -125,14 +157,22 @@ fn yaml_field(yaml: &str, key: &str) -> Option<String> {
     let mut lines = yaml.lines().peekable();
     while let Some(line) = lines.next() {
         // Only top-level keys; an indented `name:` belongs to a nested mapping.
-        if line.starts_with(char::is_whitespace) { continue; }
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
         let rest = match line.trim_end().strip_prefix(&format!("{}:", key)) {
             Some(r) => r,
             None => continue,
         };
         let inline = rest.trim();
         if !inline.is_empty() && !matches!(inline, "|" | ">" | "|-" | ">-" | "|+" | ">+") {
-            return Some(inline.trim_matches('"').trim_matches('\'').trim().to_string());
+            return Some(
+                inline
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim()
+                    .to_string(),
+            );
         }
         // Block scalar or list: gather the indented lines that follow.
         let mut parts = Vec::new();
@@ -141,17 +181,27 @@ fn yaml_field(yaml: &str, key: &str) -> Option<String> {
                 lines.next();
                 continue;
             }
-            if !next.starts_with(char::is_whitespace) { break; }
+            if !next.starts_with(char::is_whitespace) {
+                break;
+            }
             parts.push(next.trim().to_string());
             lines.next();
         }
         let is_list = parts.iter().all(|p| p.starts_with("- "));
         let joined = if is_list {
-            parts.iter().map(|p| p[2..].trim()).collect::<Vec<_>>().join(", ")
+            parts
+                .iter()
+                .map(|p| p[2..].trim())
+                .collect::<Vec<_>>()
+                .join(", ")
         } else {
             parts.join(" ")
         };
-        return if joined.is_empty() { None } else { Some(joined) };
+        return if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        };
     }
     None
 }
@@ -180,14 +230,21 @@ fn scan_agent_dir(dir: &std::path::Path, kind: &str, source: Option<&str>, out: 
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
-        if let Some(agent) = read_agent_file(&path, kind, source) { out.push(agent); }
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(agent) = read_agent_file(&path, kind, source) {
+            out.push(agent);
+        }
     }
 }
 
 /// `(plugin name, install path)` for each plugin in `installed_plugins.json`.
 fn installed_plugin_paths(home: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
-    let manifest = home.join(".claude").join("plugins").join("installed_plugins.json");
+    let manifest = home
+        .join(".claude")
+        .join("plugins")
+        .join("installed_plugins.json");
     let content = match std::fs::read_to_string(&manifest) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -225,18 +282,45 @@ pub async fn list_mcp_servers() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn add_mcp_server(name: String, command_str: String, args: Option<Vec<String>>, scope: Option<String>, env: Option<Vec<String>>) -> Result<Value, String> {
-    let mut cli: Vec<String> = vec!["mcp".into(), "add".into(), "--scope".into(), scope.unwrap_or("local".into())];
-    if let Some(envs) = env { for e in envs { cli.push("-e".into()); cli.push(e); } }
-    cli.push(name); cli.push("--".into()); cli.push(command_str);
-    if let Some(a) = args { cli.extend(a); }
+pub async fn add_mcp_server(
+    name: String,
+    command_str: String,
+    args: Option<Vec<String>>,
+    scope: Option<String>,
+    env: Option<Vec<String>>,
+) -> Result<Value, String> {
+    let mut cli: Vec<String> = vec![
+        "mcp".into(),
+        "add".into(),
+        "--scope".into(),
+        scope.unwrap_or("local".into()),
+    ];
+    if let Some(envs) = env {
+        for e in envs {
+            cli.push("-e".into());
+            cli.push(e);
+        }
+    }
+    cli.push(name);
+    cli.push("--".into());
+    cli.push(command_str);
+    if let Some(a) = args {
+        cli.extend(a);
+    }
     run_claude(cli).await?;
     list_mcp_servers().await
 }
 
 #[tauri::command]
 pub async fn remove_mcp_server(name: String, scope: Option<String>) -> Result<Value, String> {
-    run_claude(vec!["mcp".into(), "remove".into(), "--scope".into(), scope.unwrap_or("local".into()), name]).await?;
+    run_claude(vec![
+        "mcp".into(),
+        "remove".into(),
+        "--scope".into(),
+        scope.unwrap_or("local".into()),
+        name,
+    ])
+    .await?;
     list_mcp_servers().await
 }
 
@@ -261,7 +345,12 @@ pub async fn uninstall_plugin(name: String) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn toggle_plugin(name: String, enabled: bool) -> Result<Value, String> {
-    run_claude(vec!["plugin".into(), if enabled { "enable" } else { "disable" }.into(), name]).await?;
+    run_claude(vec![
+        "plugin".into(),
+        if enabled { "enable" } else { "disable" }.into(),
+        name,
+    ])
+    .await?;
     list_plugins().await
 }
 
@@ -273,13 +362,27 @@ pub async fn list_marketplaces() -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn add_marketplace(source: String, scope: Option<String>) -> Result<Value, String> {
-    run_claude(vec!["plugin".into(), "marketplace".into(), "add".into(), "--scope".into(), scope.unwrap_or("user".into()), source]).await?;
+    run_claude(vec![
+        "plugin".into(),
+        "marketplace".into(),
+        "add".into(),
+        "--scope".into(),
+        scope.unwrap_or("user".into()),
+        source,
+    ])
+    .await?;
     list_marketplaces().await
 }
 
 #[tauri::command]
 pub async fn remove_marketplace(name: String) -> Result<Value, String> {
-    run_claude(vec!["plugin".into(), "marketplace".into(), "remove".into(), name]).await?;
+    run_claude(vec![
+        "plugin".into(),
+        "marketplace".into(),
+        "remove".into(),
+        name,
+    ])
+    .await?;
     list_marketplaces().await
 }
 
@@ -288,10 +391,14 @@ pub async fn remove_marketplace(name: String) -> Result<Value, String> {
 pub async fn get_claude_settings() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let path = dirs_home().join(".claude").join("settings.json");
-        if !path.exists() { return Ok(serde_json::json!({})); }
+        if !path.exists() {
+            return Ok(serde_json::json!({}));
+        }
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -301,7 +408,9 @@ pub async fn save_claude_settings(settings: Value) -> Result<(), String> {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
         std::fs::write(dir.join("settings.json"), json).map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─── Agents ───
@@ -378,7 +487,12 @@ pub async fn list_agents() -> Result<Value, String> {
         let home = dirs_home();
         let mut agents = Vec::new();
         builtin_agents(&mut agents);
-        scan_agent_dir(&home.join(".claude").join("agents"), "user", None, &mut agents);
+        scan_agent_dir(
+            &home.join(".claude").join("agents"),
+            "user",
+            None,
+            &mut agents,
+        );
         for (plugin, path) in installed_plugin_paths(&home) {
             scan_agent_dir(&path.join("agents"), "plugin", Some(&plugin), &mut agents);
         }
@@ -413,13 +527,18 @@ pub async fn update_claude_cli() -> Result<String, String> {
 #[tauri::command]
 pub async fn get_hooks() -> Result<Value, String> {
     let settings = get_claude_settings().await?;
-    Ok(settings.get("hooks").cloned().unwrap_or(serde_json::json!({})))
+    Ok(settings
+        .get("hooks")
+        .cloned()
+        .unwrap_or(serde_json::json!({})))
 }
 
 #[tauri::command]
 pub async fn save_hooks(hooks: Value) -> Result<(), String> {
     let mut settings = get_claude_settings().await?;
-    let obj = settings.as_object_mut().ok_or("Settings is not an object")?;
+    let obj = settings
+        .as_object_mut()
+        .ok_or("Settings is not an object")?;
     obj.insert("hooks".into(), hooks);
     save_claude_settings(Value::Object(obj.clone())).await
 }
@@ -429,19 +548,33 @@ pub async fn save_hooks(hooks: Value) -> Result<(), String> {
 pub async fn list_sessions() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let projects_dir = dirs_home().join(".claude").join("projects");
-        if !projects_dir.exists() { return Ok(Value::Array(vec![])); }
+        if !projects_dir.exists() {
+            return Ok(Value::Array(vec![]));
+        }
         let mut all = Vec::new();
         for pe in std::fs::read_dir(&projects_dir).map_err(|e| e.to_string())? {
             let pe = pe.map_err(|e| e.to_string())?;
-            if !pe.file_type().map_err(|e| e.to_string())?.is_dir() { continue; }
+            if !pe.file_type().map_err(|e| e.to_string())?.is_dir() {
+                continue;
+            }
             let pname = pe.file_name().to_string_lossy().to_string();
-            let display = pname.replace("C--", "C:/").replace("c--", "C:/").replace('-', "/");
+            let display = pname
+                .replace("C--", "C:/")
+                .replace("c--", "C:/")
+                .replace('-', "/");
             for f in std::fs::read_dir(pe.path()).map_err(|e| e.to_string())? {
                 let f = f.map_err(|e| e.to_string())?;
                 let fname = f.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".jsonl") { continue; }
+                if !fname.ends_with(".jsonl") {
+                    continue;
+                }
                 let meta = f.metadata().map_err(|e| e.to_string())?;
-                let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 // Use file size as proxy for line count (avoid reading entire file)
                 all.push(serde_json::json!({
                     "sessionId": fname.trim_end_matches(".jsonl"),
@@ -450,10 +583,17 @@ pub async fn list_sessions() -> Result<Value, String> {
                 }));
             }
         }
-        all.sort_by(|a, b| b["modified"].as_i64().unwrap_or(0).cmp(&a["modified"].as_i64().unwrap_or(0)));
+        all.sort_by(|a, b| {
+            b["modified"]
+                .as_i64()
+                .unwrap_or(0)
+                .cmp(&a["modified"].as_i64().unwrap_or(0))
+        });
         all.truncate(50);
         Ok(Value::Array(all))
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─── Permissions ───
@@ -469,7 +609,13 @@ pub fn prescan_stats(project_id: i64) -> Result<serde_json::Value, String> {
     let db = crate::db::get_db();
     let project = crate::db::projects::get_by_id(&db, project_id).ok_or("Project not found")?;
     let (file_count, project_types) = collect_codebase_stats(&project.working_dir);
-    let estimated_time = if file_count < 5000 { "1-2 minutes" } else if file_count < 20000 { "2-5 minutes" } else { "5-10 minutes" };
+    let estimated_time = if file_count < 5000 {
+        "1-2 minutes"
+    } else if file_count < 20000 {
+        "2-5 minutes"
+    } else {
+        "5-10 minutes"
+    };
     Ok(serde_json::json!({
         "fileCount": file_count,
         "projectTypes": project_types,
@@ -480,13 +626,34 @@ pub fn prescan_stats(project_id: i64) -> Result<serde_json::Value, String> {
 /// Walk directory and count files / detect project types (excludes common non-source dirs).
 fn collect_codebase_stats(working_dir: &str) -> (usize, Vec<String>) {
     use std::collections::HashSet;
-    let skip_dirs: HashSet<&str> = ["node_modules", ".git", "dist", "build", "target", ".next",
-        "__pycache__", ".venv", "venv", ".tox", "vendor", ".cache", "coverage"].iter().copied().collect();
+    let skip_dirs: HashSet<&str> = [
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "target",
+        ".next",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        "vendor",
+        ".cache",
+        "coverage",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     let mut file_count: usize = 0;
     let mut markers: HashSet<String> = HashSet::new();
 
-    fn walk(dir: &std::path::Path, skip: &std::collections::HashSet<&str>, count: &mut usize, markers: &mut std::collections::HashSet<String>) {
+    fn walk(
+        dir: &std::path::Path,
+        skip: &std::collections::HashSet<&str>,
+        count: &mut usize,
+        markers: &mut std::collections::HashSet<String>,
+    ) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -502,24 +669,51 @@ fn collect_codebase_stats(working_dir: &str) -> (usize, Vec<String>) {
                 *count += 1;
                 // Detect project types from marker files
                 match name.as_str() {
-                    "package.json" => { markers.insert("Node.js".into()); }
-                    "Cargo.toml" => { markers.insert("Rust".into()); }
-                    "go.mod" => { markers.insert("Go".into()); }
-                    "requirements.txt" | "setup.py" | "pyproject.toml" => { markers.insert("Python".into()); }
-                    "pom.xml" | "build.gradle" => { markers.insert("Java".into()); }
-                    "tsconfig.json" => { markers.insert("TypeScript".into()); }
-                    "tauri.conf.json" => { markers.insert("Tauri".into()); }
-                    "next.config.js" | "next.config.mjs" | "next.config.ts" => { markers.insert("Next.js".into()); }
-                    "vite.config.js" | "vite.config.ts" => { markers.insert("Vite".into()); }
-                    "Dockerfile" | "docker-compose.yml" => { markers.insert("Docker".into()); }
-                    "Gemfile" => { markers.insert("Ruby".into()); }
+                    "package.json" => {
+                        markers.insert("Node.js".into());
+                    }
+                    "Cargo.toml" => {
+                        markers.insert("Rust".into());
+                    }
+                    "go.mod" => {
+                        markers.insert("Go".into());
+                    }
+                    "requirements.txt" | "setup.py" | "pyproject.toml" => {
+                        markers.insert("Python".into());
+                    }
+                    "pom.xml" | "build.gradle" => {
+                        markers.insert("Java".into());
+                    }
+                    "tsconfig.json" => {
+                        markers.insert("TypeScript".into());
+                    }
+                    "tauri.conf.json" => {
+                        markers.insert("Tauri".into());
+                    }
+                    "next.config.js" | "next.config.mjs" | "next.config.ts" => {
+                        markers.insert("Next.js".into());
+                    }
+                    "vite.config.js" | "vite.config.ts" => {
+                        markers.insert("Vite".into());
+                    }
+                    "Dockerfile" | "docker-compose.yml" => {
+                        markers.insert("Docker".into());
+                    }
+                    "Gemfile" => {
+                        markers.insert("Ruby".into());
+                    }
                     _ => {}
                 }
             }
         }
     }
 
-    walk(std::path::Path::new(working_dir), &skip_dirs, &mut file_count, &mut markers);
+    walk(
+        std::path::Path::new(working_dir),
+        &skip_dirs,
+        &mut file_count,
+        &mut markers,
+    );
     let mut types: Vec<String> = markers.into_iter().collect();
     types.sort();
     (file_count, types)
@@ -539,19 +733,37 @@ pub async fn scan_codebase(
     let scan_type_str = scan_type.unwrap_or_else(|| "detailed".into());
 
     use tauri::Emitter;
-    app.emit("scan:started", &serde_json::json!({"projectId": project_id, "scanType": scan_type_str})).ok();
+    app.emit(
+        "scan:started",
+        &serde_json::json!({"projectId": project_id, "scanType": scan_type_str}),
+    )
+    .ok();
 
     // Pre-scan stats
     let (file_count, project_types) = collect_codebase_stats(&working_dir);
-    let project_types_str = if project_types.is_empty() { "software".to_string() } else { project_types.join("/") };
+    let project_types_str = if project_types.is_empty() {
+        "software".to_string()
+    } else {
+        project_types.join("/")
+    };
     let project_types_json = serde_json::to_string(&project_types).unwrap_or_else(|_| "[]".into());
-    let estimated_time = if file_count < 5000 { "1-2 minutes" } else if file_count < 20000 { "2-5 minutes" } else { "5-10 minutes" };
+    let estimated_time = if file_count < 5000 {
+        "1-2 minutes"
+    } else if file_count < 20000 {
+        "2-5 minutes"
+    } else {
+        "5-10 minutes"
+    };
 
-    app.emit("scan:stats", &serde_json::json!({
-        "fileCount": file_count,
-        "projectTypes": &project_types,
-        "estimatedTime": estimated_time,
-    })).ok();
+    app.emit(
+        "scan:stats",
+        &serde_json::json!({
+            "fileCount": file_count,
+            "projectTypes": &project_types,
+            "estimatedTime": estimated_time,
+        }),
+    )
+    .ok();
 
     // Build prompt based on scan type
     let prompt = match scan_type_str.as_str() {
@@ -575,23 +787,41 @@ pub async fn scan_codebase(
     };
 
     // Adjust max-turns based on codebase size
-    let max_turns = if file_count < 5000 { "10" } else if file_count < 20000 { "15" } else { "20" };
+    let max_turns = if file_count < 5000 {
+        "10"
+    } else if file_count < 20000 {
+        "15"
+    } else {
+        "20"
+    };
 
     let scan_type_for_db = scan_type_str.clone();
 
-    app.emit("scan:progress", &serde_json::json!({
-        "phase": "analyzing",
-        "message": format!("Running {} scan on {} files...", scan_type_str, file_count),
-    })).ok();
+    app.emit(
+        "scan:progress",
+        &serde_json::json!({
+            "phase": "analyzing",
+            "message": format!("Running {} scan on {} files...", scan_type_str, file_count),
+        }),
+    )
+    .ok();
 
     let result_text = tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = crate::child_env::claude_command();
-        cmd.args(["-p", &prompt, "--output-format", "text", "--max-turns", max_turns, "--dangerously-skip-permissions"])
-            .current_dir(&working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .env("NO_COLOR", "1");
+        cmd.args([
+            "-p",
+            &prompt,
+            "--output-format",
+            "text",
+            "--max-turns",
+            max_turns,
+            "--dangerously-skip-permissions",
+        ])
+        .current_dir(&working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .env("NO_COLOR", "1");
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
         let output = cmd.output().map_err(|e| format!("Failed to scan: {}", e))?;
@@ -601,7 +831,9 @@ pub async fn scan_codebase(
         } else {
             Ok(text)
         }
-    }).await.map_err(|e| e.to_string())??;
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     // Try to save to scans table (may not exist yet if migration hasn't run)
     {
@@ -622,17 +854,26 @@ pub async fn scan_codebase(
         "timestamp": timestamp,
     });
 
-    app.emit("scan:completed", &serde_json::json!({
-        "projectId": project_id,
-        "result": &result,
-    })).ok();
+    app.emit(
+        "scan:completed",
+        &serde_json::json!({
+            "projectId": project_id,
+            "result": &result,
+        }),
+    )
+    .ok();
 
     Ok(result)
 }
 
 // ─── Save scan result to CLAUDE.md ───
 #[tauri::command]
-pub async fn save_scan_result(project_id: i64, content: String, scan_type: Option<String>, mode: Option<String>) -> Result<(), String> {
+pub async fn save_scan_result(
+    project_id: i64,
+    content: String,
+    scan_type: Option<String>,
+    mode: Option<String>,
+) -> Result<(), String> {
     let db = crate::db::get_db();
     let project = crate::db::projects::get_by_id(&db, project_id).ok_or("Project not found")?;
     let write_mode = mode.unwrap_or_else(|| "overwrite".into());
@@ -644,7 +885,12 @@ pub async fn save_scan_result(project_id: i64, content: String, scan_type: Optio
         if existing.is_empty() {
             format!("{}\n\n{}", section_header, content)
         } else {
-            format!("{}\n\n---\n\n{}\n\n{}", existing.trim(), section_header, content)
+            format!(
+                "{}\n\n---\n\n{}\n\n{}",
+                existing.trim(),
+                section_header,
+                content
+            )
         }
     } else {
         format!("{}\n\n{}", section_header, content)
@@ -715,18 +961,30 @@ pub async fn get_suggestions() -> Result<Value, String> {
 pub async fn list_custom_commands() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let mut items = Vec::new();
-        let dirs = [
-            dirs_home().join(".claude").join("commands"),
-        ];
+        let dirs = [dirs_home().join(".claude").join("commands")];
         for dir in &dirs {
-            if !dir.exists() { continue; }
-            let scope = if dir.starts_with(dirs_home().join(".claude")) { "user" } else { "project" };
+            if !dir.exists() {
+                continue;
+            }
+            let scope = if dir.starts_with(dirs_home().join(".claude")) {
+                "user"
+            } else {
+                "project"
+            };
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-                    if ext != "md" { continue; }
+                    let name = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let ext = path
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if ext != "md" {
+                        continue;
+                    }
                     let content = std::fs::read_to_string(&path).unwrap_or_default();
                     let meta = entry.metadata().ok();
                     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -740,9 +998,16 @@ pub async fn list_custom_commands() -> Result<Value, String> {
                 }
             }
         }
-        items.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+        items.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        });
         Ok(Value::Array(items))
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─── Custom Skills ───
@@ -751,13 +1016,23 @@ pub async fn list_custom_skills() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let mut items = Vec::new();
         let dir = dirs_home().join(".claude").join("skills");
-        if !dir.exists() { return Ok(Value::Array(items)); }
+        if !dir.exists() {
+            return Ok(Value::Array(items));
+        }
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-                if ext != "md" { continue; }
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if ext != "md" {
+                    continue;
+                }
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let meta = entry.metadata().ok();
                 let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -769,9 +1044,16 @@ pub async fn list_custom_skills() -> Result<Value, String> {
                 }));
             }
         }
-        items.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+        items.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        });
         Ok(Value::Array(items))
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─── Skill Management ───
@@ -783,18 +1065,25 @@ pub async fn save_custom_skill(name: String, content: String) -> Result<(), Stri
         let path = dir.join(format!("{}.md", name));
         std::fs::write(&path, &content).map_err(|e| e.to_string())?;
         Ok(())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn delete_custom_skill(name: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = dirs_home().join(".claude").join("skills").join(format!("{}.md", name));
+        let path = dirs_home()
+            .join(".claude")
+            .join("skills")
+            .join(format!("{}.md", name));
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
         Ok(())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Fetch skill from a raw URL (download_url from GitHub API or constructed raw URL)
@@ -811,7 +1100,9 @@ pub async fn fetch_skill_content(url: String) -> Result<String, String> {
             return Err(format!("Failed to fetch: {}", resp.status()));
         }
         resp.text().map_err(|e| e.to_string())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -825,7 +1116,10 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
             let parts: Vec<&str> = repo.splitn(2, "/tree/").collect();
             let sub = parts.get(1).unwrap_or(&"");
             let sub_parts: Vec<&str> = sub.splitn(2, '/').collect();
-            (parts[0].to_string(), sub_parts.get(1).map(|s| s.to_string()))
+            (
+                parts[0].to_string(),
+                sub_parts.get(1).map(|s| s.to_string()),
+            )
         } else {
             (repo.to_string(), None)
         };
@@ -837,33 +1131,51 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
             .map_err(|e| e.to_string())?;
 
         // Strategy 1: Try skills_index.json (fast catalog with metadata)
-        let index_url = format!("https://raw.githubusercontent.com/{}/main/skills_index.json", repo_slug);
+        let index_url = format!(
+            "https://raw.githubusercontent.com/{}/main/skills_index.json",
+            repo_slug
+        );
         if let Ok(resp) = client.get(&index_url).send() {
             if resp.status().is_success() {
                 if let Ok(index) = resp.json::<Vec<Value>>() {
-                    let skills: Vec<Value> = index.iter().map(|entry| {
-                        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(id);
-                        let desc = entry.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                        let category = entry.get("category").and_then(|v| v.as_str()).unwrap_or("other");
-                        let skill_path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        // Build download URL for SKILL.md inside the skill folder
-                        let download_url = format!(
-                            "https://raw.githubusercontent.com/{}/main/{}/SKILL.md",
-                            repo_slug, skill_path
-                        );
-                        serde_json::json!({
-                            "name": name,
-                            "description": desc,
-                            "category": category,
-                            "downloadUrl": download_url,
-                            "source": "index",
+                    let skills: Vec<Value> = index
+                        .iter()
+                        .map(|entry| {
+                            let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                            let desc = entry
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let category = entry
+                                .get("category")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("other");
+                            let skill_path =
+                                entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                            // Build download URL for SKILL.md inside the skill folder
+                            let download_url = format!(
+                                "https://raw.githubusercontent.com/{}/main/{}/SKILL.md",
+                                repo_slug, skill_path
+                            );
+                            serde_json::json!({
+                                "name": name,
+                                "description": desc,
+                                "category": category,
+                                "downloadUrl": download_url,
+                                "source": "index",
+                            })
                         })
-                    }).collect();
+                        .collect();
 
                     // Extract unique categories
-                    let mut categories: Vec<String> = skills.iter()
-                        .filter_map(|s| s.get("category").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    let mut categories: Vec<String> = skills
+                        .iter()
+                        .filter_map(|s| {
+                            s.get("category")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
                         .collect();
                     categories.sort();
                     categories.dedup();
@@ -891,7 +1203,11 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
             let api_url = if try_path.is_empty() {
                 format!("https://api.github.com/repos/{}/contents", repo_slug)
             } else {
-                format!("https://api.github.com/repos/{}/contents/{}", repo_slug, try_path.trim_start_matches('/'))
+                format!(
+                    "https://api.github.com/repos/{}/contents/{}",
+                    repo_slug,
+                    try_path.trim_start_matches('/')
+                )
             };
 
             let resp = match client.get(&api_url).send() {
@@ -908,11 +1224,19 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
 
             if let Some(entries) = body.as_array() {
                 // Detect if this is a skill-folder directory (most entries are dirs)
-                let dir_count = entries.iter().filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("dir")).count();
-                let file_count = entries.iter().filter(|e| {
-                    let n = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    e.get("type").and_then(|v| v.as_str()) == Some("file") && n.ends_with(".md") && n != "README.md"
-                }).count();
+                let dir_count = entries
+                    .iter()
+                    .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("dir"))
+                    .count();
+                let file_count = entries
+                    .iter()
+                    .filter(|e| {
+                        let n = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        e.get("type").and_then(|v| v.as_str()) == Some("file")
+                            && n.ends_with(".md")
+                            && n != "README.md"
+                    })
+                    .count();
 
                 if dir_count > file_count && dir_count > 3 {
                     // Skill-folder pattern: each subdirectory IS a skill (contains SKILL.md)
@@ -921,8 +1245,12 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
                     for entry in entries {
                         let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         let entry_path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        if entry.get("type").and_then(|v| v.as_str()) != Some("dir") { continue; }
-                        if name.starts_with('.') || name == "scripts" || name == "references" { continue; }
+                        if entry.get("type").and_then(|v| v.as_str()) != Some("dir") {
+                            continue;
+                        }
+                        if name.starts_with('.') || name == "scripts" || name == "references" {
+                            continue;
+                        }
 
                         let download_url = format!(
                             "https://raw.githubusercontent.com/{}/{}/{}/SKILL.md",
@@ -941,7 +1269,10 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
                     for entry in entries {
                         let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let download_url = entry.get("download_url").and_then(|v| v.as_str()).unwrap_or("");
+                        let download_url = entry
+                            .get("download_url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
 
                         if entry_type == "file" && name.ends_with(".md") && name != "README.md" {
                             let skill_name = name.trim_end_matches(".md");
@@ -958,7 +1289,9 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
 
                 if !skills.is_empty() {
                     skills.sort_by(|a, b| {
-                        a.get("name").and_then(|v| v.as_str()).unwrap_or("")
+                        a.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
                             .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
                     });
                     return Ok(serde_json::json!({
@@ -972,11 +1305,16 @@ pub async fn fetch_github_skills(repo_url: String, path: Option<String>) -> Resu
         }
 
         Err("No skills found in this repository. Try a different URL or path.".into())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn detect_default_branch(client: &reqwest::blocking::Client, repo: &str) -> String {
-    if let Ok(resp) = client.get(format!("https://api.github.com/repos/{}", repo)).send() {
+    if let Ok(resp) = client
+        .get(format!("https://api.github.com/repos/{}", repo))
+        .send()
+    {
         if let Ok(data) = resp.json::<serde_json::Value>() {
             if let Some(branch) = data.get("default_branch").and_then(|v| v.as_str()) {
                 return branch.to_string();
@@ -1041,8 +1379,14 @@ mod tests {
 
     #[test]
     fn yaml_field_strips_surrounding_quotes() {
-        assert_eq!(yaml_field("\nname: \"quoted\"", "name").as_deref(), Some("quoted"));
-        assert_eq!(yaml_field("\nname: 'single'", "name").as_deref(), Some("single"));
+        assert_eq!(
+            yaml_field("\nname: \"quoted\"", "name").as_deref(),
+            Some("quoted")
+        );
+        assert_eq!(
+            yaml_field("\nname: 'single'", "name").as_deref(),
+            Some("single")
+        );
     }
 
     #[test]
@@ -1126,8 +1470,14 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                ("code-simplifier".to_string(), std::path::PathBuf::from("/tmp/cs/1.0.0")),
-                ("superpowers".to_string(), std::path::PathBuf::from("/tmp/sp/6.2.0")),
+                (
+                    "code-simplifier".to_string(),
+                    std::path::PathBuf::from("/tmp/cs/1.0.0")
+                ),
+                (
+                    "superpowers".to_string(),
+                    std::path::PathBuf::from("/tmp/sp/6.2.0")
+                ),
             ]
         );
 
@@ -1150,7 +1500,11 @@ mod tests {
             assert_eq!(agent["type"], "builtin");
             // Built-ins live in no file, so the fields that describe a location
             // stay null rather than pointing at something that does not exist.
-            assert!(agent["source"].is_null(), "{} carried a source", agent["name"]);
+            assert!(
+                agent["source"].is_null(),
+                "{} carried a source",
+                agent["name"]
+            );
             assert!(agent["path"].is_null(), "{} carried a path", agent["name"]);
             assert!(!agent["name"].as_str().unwrap_or_default().is_empty());
             assert!(!agent["description"].as_str().unwrap_or_default().is_empty());
@@ -1159,7 +1513,11 @@ mod tests {
 
         let names: Vec<&str> = out.iter().map(|a| a["name"].as_str().unwrap()).collect();
         for expected in ["general-purpose", "Explore", "Plan", "statusline-setup"] {
-            assert!(names.contains(&expected), "{} missing from the built-in list", expected);
+            assert!(
+                names.contains(&expected),
+                "{} missing from the built-in list",
+                expected
+            );
         }
     }
 
@@ -1175,7 +1533,12 @@ mod tests {
     #[test]
     fn scan_agent_dir_tolerates_missing_directory() {
         let mut found = Vec::new();
-        scan_agent_dir(std::path::Path::new("/nonexistent/agents"), "user", None, &mut found);
+        scan_agent_dir(
+            std::path::Path::new("/nonexistent/agents"),
+            "user",
+            None,
+            &mut found,
+        );
         assert!(found.is_empty());
     }
 }

@@ -1,9 +1,9 @@
-use crate::db::tasks::{Task, TaskRevision};
-use crate::db::snippets::Snippet;
 use crate::db::attachments::Attachment;
-use crate::db::roles::Role;
-use crate::db::templates::Template;
 use crate::db::projects::Project;
+use crate::db::roles::Role;
+use crate::db::snippets::Snippet;
+use crate::db::tasks::{Task, TaskRevision};
+use crate::db::templates::Template;
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_prompt(
@@ -68,15 +68,25 @@ pub fn build_prompt(
         parts.push(format!("This task has been reviewed {} time(s). Address ALL feedback from the latest revision.", revisions.len()));
         parts.push("Previous work has already been committed — build on top of it, do NOT start from scratch.\n".into());
         for rev in revisions {
-            parts.push(format!("### Revision #{} ({})", rev.revision_number, rev.created_at.as_deref().unwrap_or("")));
+            parts.push(format!(
+                "### Revision #{} ({})",
+                rev.revision_number,
+                rev.created_at.as_deref().unwrap_or("")
+            ));
             parts.push(rev.feedback.clone());
             parts.push(String::new());
         }
         parts.push("\n## IMPORTANT: Revision Instructions".into());
-        parts.push(format!("- Focus on the LATEST revision feedback (#{}) above.", revision_num));
+        parts.push(format!(
+            "- Focus on the LATEST revision feedback (#{}) above.",
+            revision_num
+        ));
         parts.push("- The previous work is already in the codebase — review what was done and fix/improve based on the feedback.".into());
         parts.push("- Do NOT redo work that was already accepted — only change what the feedback asks for.".into());
-        parts.push(format!("- Commit your revision changes with a clear message referencing revision #{}.", revision_num));
+        parts.push(format!(
+            "- Commit your revision changes with a clear message referencing revision #{}.",
+            revision_num
+        ));
     }
 
     // Context from completed parent dependencies
@@ -106,15 +116,24 @@ pub fn build_prompt(
             let size_kb = a.size.unwrap_or(0) as f64 / 1024.0;
             parts.push(format!(
                 "- **{}** ({}, {:.1}KB) → `.claude-attachments/{}`",
-                a.original_name, a.mime_type.as_deref().unwrap_or(""), size_kb, a.filename
+                a.original_name,
+                a.mime_type.as_deref().unwrap_or(""),
+                size_kb,
+                a.filename
             ));
         }
         parts.push("\nThese files are available in the `.claude-attachments/` directory relative to the working directory. Read them as needed for context.".into());
     }
 
     parts.push("\n## Claude Board Integration".into());
-    parts.push("You have access to Claude Board MCP tools. Use them to manage tasks on the project board:".into());
-    parts.push(format!("- **list_tasks** — See all tasks in this project (project_id: {})", project_id));
+    parts.push(
+        "You have access to Claude Board MCP tools. Use them to manage tasks on the project board:"
+            .into(),
+    );
+    parts.push(format!(
+        "- **list_tasks** — See all tasks in this project (project_id: {})",
+        project_id
+    ));
     parts.push(format!("- **create_task** — Create sub-tasks if this task needs to be broken down. Pass parent_task_id: {} to link them — the parent will automatically wait for all sub-tasks to complete.", task.id));
     parts.push("- **change_task_status** — Move tasks between statuses".into());
     parts.push("- **get_task_detail** — Get full details of any task".into());
@@ -122,12 +141,19 @@ pub fn build_prompt(
     parts.push(format!("Use these tools when the task description asks you to plan, break down work, or manage tasks. The current project_id is {}.", project_id));
 
     parts.push("\n## Instructions".into());
-    parts.push(format!("- Task type: {}", task.task_type.as_deref().unwrap_or("feature")));
+    parts.push(format!(
+        "- Task type: {}",
+        task.task_type.as_deref().unwrap_or("feature")
+    ));
     parts.push("- Complete this task thoroughly and commit your changes.".into());
 
     let branch = task.branch_name.as_deref().unwrap_or("");
-    let auto_branch_on = project.map(|p| p.auto_branch.unwrap_or(1) == 1).unwrap_or(true);
-    let auto_push_on = project.map(|p| p.auto_push.unwrap_or(0) == 1).unwrap_or(false);
+    let auto_branch_on = project
+        .map(|p| p.auto_branch.unwrap_or(1) == 1)
+        .unwrap_or(true);
+    let auto_push_on = project
+        .map(|p| p.auto_push.unwrap_or(0) == 1)
+        .unwrap_or(false);
 
     if !is_revision {
         if !branch.is_empty() {
@@ -137,11 +163,21 @@ pub fn build_prompt(
                 parts.push(format!("- You are already on branch \"{}\". Commit your changes to this branch. Do NOT run git push.", branch));
             }
         } else if auto_branch_on {
-            let branch_hint = format!("{}/task-{}", task.task_type.as_deref().unwrap_or("feature"), task.id);
+            let branch_hint = format!(
+                "{}/task-{}",
+                task.task_type.as_deref().unwrap_or("feature"),
+                task.id
+            );
             if auto_push_on {
-                parts.push(format!("- Create a new branch named {}, commit, and push.", branch_hint));
+                parts.push(format!(
+                    "- Create a new branch named {}, commit, and push.",
+                    branch_hint
+                ));
             } else {
-                parts.push(format!("- Create a new branch named {}, and commit your changes. Do NOT run git push.", branch_hint));
+                parts.push(format!(
+                    "- Create a new branch named {}, and commit your changes. Do NOT run git push.",
+                    branch_hint
+                ));
             }
         } else {
             // auto_branch OFF: work on current branch, no new branches
@@ -152,7 +188,10 @@ pub fn build_prompt(
         }
     } else if !branch.is_empty() {
         if auto_push_on {
-            parts.push(format!("- You are on branch \"{}\". Commit and push your revision changes to this branch.", branch));
+            parts.push(format!(
+                "- You are on branch \"{}\". Commit and push your revision changes to this branch.",
+                branch
+            ));
         } else {
             parts.push(format!("- You are on branch \"{}\". Commit your revision changes to this branch. Do NOT run git push.", branch));
         }

@@ -1,6 +1,6 @@
+use crate::db::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use crate::db::DbPool;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -45,11 +45,13 @@ pub fn get(db: &DbPool) -> AppSettings {
         Ok(s) => s,
         Err(_) => return AppSettings::default(),
     };
-    let rows: Vec<(String, String)> = match stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    let rows: Vec<(String, String)> = match stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
     {
         Ok(r) => r.flatten().collect(),
-        Err(e) => { log::error!("get: {}", e); return AppSettings::default(); }
+        Err(e) => {
+            log::error!("get: {}", e);
+            return AppSettings::default();
+        }
     };
 
     let mut settings = AppSettings::default();
@@ -88,17 +90,38 @@ pub fn update(db: &DbPool, settings: &AppSettings) {
     let pairs: Vec<(&str, String)> = vec![
         ("launch_at_startup", settings.launch_at_startup.to_string()),
         ("minimize_to_tray", settings.minimize_to_tray.to_string()),
-        ("confirm_before_delete", settings.confirm_before_delete.to_string()),
+        (
+            "confirm_before_delete",
+            settings.confirm_before_delete.to_string(),
+        ),
         ("default_model", settings.default_model.clone()),
         ("default_effort", settings.default_effort.clone()),
         ("language", settings.language.clone()),
-        ("notify_task_completed", settings.notify_task_completed.to_string()),
-        ("notify_task_failed", settings.notify_task_failed.to_string()),
-        ("notify_task_started", settings.notify_task_started.to_string()),
-        ("notify_revision_requested", settings.notify_revision_requested.to_string()),
-        ("notify_queue_started", settings.notify_queue_started.to_string()),
+        (
+            "notify_task_completed",
+            settings.notify_task_completed.to_string(),
+        ),
+        (
+            "notify_task_failed",
+            settings.notify_task_failed.to_string(),
+        ),
+        (
+            "notify_task_started",
+            settings.notify_task_started.to_string(),
+        ),
+        (
+            "notify_revision_requested",
+            settings.notify_revision_requested.to_string(),
+        ),
+        (
+            "notify_queue_started",
+            settings.notify_queue_started.to_string(),
+        ),
         ("sound_enabled", settings.sound_enabled.to_string()),
-        ("auto_open_terminal", settings.auto_open_terminal.to_string()),
+        (
+            "auto_open_terminal",
+            settings.auto_open_terminal.to_string(),
+        ),
     ];
     for (key, value) in pairs {
         set(db, key, &value);

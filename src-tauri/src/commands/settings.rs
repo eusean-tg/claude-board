@@ -1,5 +1,5 @@
-use tauri::AppHandle;
 use crate::db::{self, settings};
+use tauri::AppHandle;
 
 #[tauri::command]
 pub fn get_app_settings(_app: AppHandle) -> Result<settings::AppSettings, String> {
@@ -22,7 +22,10 @@ pub fn get_app_settings(_app: AppHandle) -> Result<settings::AppSettings, String
 }
 
 #[tauri::command]
-pub fn update_app_settings(_app: AppHandle, data: serde_json::Value) -> Result<settings::AppSettings, String> {
+pub fn update_app_settings(
+    _app: AppHandle,
+    data: serde_json::Value,
+) -> Result<settings::AppSettings, String> {
     let db = db::get_db();
     let mut current = settings::get(&db);
 
@@ -63,7 +66,10 @@ pub fn update_app_settings(_app: AppHandle, data: serde_json::Value) -> Result<s
     if let Some(v) = data.get("notify_task_started").and_then(|v| v.as_bool()) {
         current.notify_task_started = v;
     }
-    if let Some(v) = data.get("notify_revision_requested").and_then(|v| v.as_bool()) {
+    if let Some(v) = data
+        .get("notify_revision_requested")
+        .and_then(|v| v.as_bool())
+    {
         current.notify_revision_requested = v;
     }
     if let Some(v) = data.get("notify_queue_started").and_then(|v| v.as_bool()) {

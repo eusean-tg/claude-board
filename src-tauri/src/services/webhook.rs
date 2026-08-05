@@ -10,10 +10,17 @@ pub fn fire(project_id: i64, event_type: &str, message: &str, metadata: serde_js
     });
 }
 
-pub async fn dispatch(project_id: i64, event_type: &str, message: &str, metadata: &serde_json::Value) {
+pub async fn dispatch(
+    project_id: i64,
+    event_type: &str,
+    message: &str,
+    metadata: &serde_json::Value,
+) {
     let db = db::get_db();
     let hooks = webhooks::get_enabled_by_project(&db, project_id);
-    if hooks.is_empty() { return; }
+    if hooks.is_empty() {
+        return;
+    }
 
     let client = reqwest::Client::new();
 
@@ -24,20 +31,29 @@ pub async fn dispatch(project_id: i64, event_type: &str, message: &str, metadata
 
         let payload = build_payload(
             hook.platform.as_deref().unwrap_or("custom"),
-            event_type, message, metadata,
+            event_type,
+            message,
+            metadata,
         );
 
-        if let Err(e) = client.post(&hook.url)
+        if let Err(e) = client
+            .post(&hook.url)
             .json(&payload)
             .timeout(std::time::Duration::from_secs(10))
-            .send().await
+            .send()
+            .await
         {
             log::warn!("Webhook delivery failed for {}: {}", hook.name, e);
         }
     }
 }
 
-fn build_payload(platform: &str, event_type: &str, message: &str, metadata: &serde_json::Value) -> serde_json::Value {
+fn build_payload(
+    platform: &str,
+    event_type: &str,
+    message: &str,
+    metadata: &serde_json::Value,
+) -> serde_json::Value {
     match platform {
         "discord" => serde_json::json!({
             "embeds": [{

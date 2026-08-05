@@ -194,11 +194,7 @@ fn build_search_dirs() -> Vec<PathBuf> {
         .unwrap_or_default();
 
     let mut dirs: Vec<PathBuf> = Vec::with_capacity(inherited.len() + from_shell.len());
-    for dir in inherited
-        .into_iter()
-        .chain(from_shell)
-        .chain(extra_dirs())
-    {
+    for dir in inherited.into_iter().chain(from_shell).chain(extra_dirs()) {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
@@ -240,8 +236,7 @@ fn candidate_filenames(program: &str) -> Vec<String> {
         return vec![program.to_string()];
     }
 
-    let pathext =
-        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let mut names: Vec<String> = pathext
         .split(';')
         .map(str::trim)
@@ -430,7 +425,10 @@ mod tests {
     #[test]
     fn marked_path_is_none_when_absent_or_empty() {
         assert_eq!(extract_marked_path("no markers here"), None);
-        assert_eq!(extract_marked_path(&format!("{}{}", PATH_OPEN, PATH_CLOSE)), None);
+        assert_eq!(
+            extract_marked_path(&format!("{}{}", PATH_OPEN, PATH_CLOSE)),
+            None
+        );
         // An opening marker with no close is not a value.
         assert_eq!(extract_marked_path(&format!("{}/usr/bin", PATH_OPEN)), None);
     }
@@ -472,9 +470,15 @@ mod tests {
     #[test]
     fn candidate_filenames_cover_pathext_on_windows() {
         let names = candidate_filenames("npx");
-        assert!(names.contains(&"npx.cmd".to_string()), "npm ships npx.cmd, not npx.exe");
+        assert!(
+            names.contains(&"npx.cmd".to_string()),
+            "npm ships npx.cmd, not npx.exe"
+        );
         assert!(names.contains(&"npx.exe".to_string()));
-        assert!(names.contains(&"npx".to_string()), "extensionless name is the last resort");
+        assert!(
+            names.contains(&"npx".to_string()),
+            "extensionless name is the last resort"
+        );
     }
 
     #[test]
@@ -488,7 +492,11 @@ mod tests {
         let dirs = node_manager_dirs(&tmp);
         let nvm: Vec<&PathBuf> = dirs.iter().filter(|d| d.starts_with(&versions)).collect();
         assert_eq!(nvm.len(), 2);
-        assert_eq!(nvm[0], &versions.join("v20.20.2").join("bin"), "newest first");
+        assert_eq!(
+            nvm[0],
+            &versions.join("v20.20.2").join("bin"),
+            "newest first"
+        );
 
         // asdf shims are offered even when no nodejs install directory exists.
         assert!(dirs.contains(&tmp.join(".asdf").join("shims")));
@@ -518,7 +526,10 @@ mod tests {
     #[ignore = "spawns the user's login shell; run manually with --ignored"]
     fn login_shell_reports_a_usable_path() {
         let path = login_shell_path().expect("login shell reported no PATH");
-        assert!(path.contains(std::path::MAIN_SEPARATOR), "not a path list: {path}");
+        assert!(
+            path.contains(std::path::MAIN_SEPARATOR),
+            "not a path list: {path}"
+        );
         eprintln!("login shell PATH entries: {}", path.split(':').count());
     }
 

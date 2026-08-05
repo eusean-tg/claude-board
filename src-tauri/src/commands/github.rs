@@ -1,6 +1,6 @@
-use tauri::{AppHandle, Emitter};
 use crate::db;
 use crate::services::github;
+use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -30,7 +30,8 @@ pub fn github_detect_repo(working_dir: String) -> Result<String, String> {
         .stderr(std::process::Stdio::piped());
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
 
     if !output.status.success() {
@@ -133,16 +134,22 @@ pub async fn github_check_status(repo: String) -> Result<serde_json::Value, Stri
 fn get_project_repo(project_id: i64) -> Result<String, String> {
     let pool = db::get_db();
     let conn = pool.lock();
-    let mut stmt = conn.prepare("SELECT github_repo, github_sync_enabled FROM projects WHERE id = ?1")
+    let mut stmt = conn
+        .prepare("SELECT github_repo, github_sync_enabled FROM projects WHERE id = ?1")
         .map_err(|e| e.to_string())?;
-    let (repo, sync_enabled): (String, i64) = stmt.query_row([project_id], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-        ))
-    }).map_err(|e| format!("Project not found: {}", e))?;
+    let (repo, sync_enabled): (String, i64) = stmt
+        .query_row([project_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            ))
+        })
+        .map_err(|e| format!("Project not found: {}", e))?;
     if sync_enabled != 1 {
-        return Err("GitHub sync is not enabled for this project. Enable it in Project Settings > GitHub.".into());
+        return Err(
+            "GitHub sync is not enabled for this project. Enable it in Project Settings > GitHub."
+                .into(),
+        );
     }
     Ok(repo)
 }
@@ -176,27 +183,34 @@ pub async fn github_fetch_issues(project_id: i64) -> Result<serde_json::Value, S
     let issues = github::fetch_issues(&token, &repo, "open").await?;
     let imported = get_imported_issues(project_id);
 
-    let result: Vec<serde_json::Value> = issues.iter().map(|issue| {
-        serde_json::json!({
-            "number": issue.number,
-            "title": issue.title,
-            "body": issue.body,
-            "state": issue.state,
-            "html_url": issue.html_url,
-            "labels": issue.labels,
-            "created_at": issue.created_at,
-            "updated_at": issue.updated_at,
-            "already_imported": imported.contains(&issue.number),
-            "suggested_type": map_labels_to_type(&issue.labels),
+    let result: Vec<serde_json::Value> = issues
+        .iter()
+        .map(|issue| {
+            serde_json::json!({
+                "number": issue.number,
+                "title": issue.title,
+                "body": issue.body,
+                "state": issue.state,
+                "html_url": issue.html_url,
+                "labels": issue.labels,
+                "created_at": issue.created_at,
+                "updated_at": issue.updated_at,
+                "already_imported": imported.contains(&issue.number),
+                "suggested_type": map_labels_to_type(&issue.labels),
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(serde_json::json!({ "issues": result, "repo": repo }))
 }
 
 /// Import selected GitHub issues as tasks (user picks which ones)
 #[tauri::command]
-pub async fn github_import_issues(app: AppHandle, project_id: i64, issue_numbers: Vec<i64>) -> Result<serde_json::Value, String> {
+pub async fn github_import_issues(
+    app: AppHandle,
+    project_id: i64,
+    issue_numbers: Vec<i64>,
+) -> Result<serde_json::Value, String> {
     let repo = get_project_repo(project_id)?;
     let token = get_gh_token()?;
     let issues = github::fetch_issues(&token, &repo, "open").await?;
@@ -209,14 +223,18 @@ pub async fn github_import_issues(app: AppHandle, project_id: i64, issue_numbers
         let mut task_events: Vec<serde_json::Value> = Vec::new();
 
         for issue in &issues {
-            if !issue_numbers.contains(&issue.number) { continue; }
+            if !issue_numbers.contains(&issue.number) {
+                continue;
+            }
 
             let exists: bool = conn.query_row(
                 "SELECT COUNT(*) > 0 FROM tasks WHERE project_id = ?1 AND github_issue_number = ?2",
                 rusqlite::params![project_id, issue.number],
                 |row| row.get(0),
             ).unwrap_or(false);
-            if exists { continue; }
+            if exists {
+                continue;
+            }
 
             let task_type = map_labels_to_type(&issue.labels);
             let description = issue.body.clone().unwrap_or_default();
@@ -272,14 +290,17 @@ pub async fn github_import_issues(app: AppHandle, project_id: i64, issue_numbers
 #[tauri::command]
 pub async fn github_close_issue(project_id: i64, task_id: i64) -> Result<(), String> {
     let repo = get_project_repo(project_id)?;
-    if repo.is_empty() { return Ok(()); }
+    if repo.is_empty() {
+        return Ok(());
+    }
 
     let token = get_gh_token()?;
 
     let issue_num: Option<i64> = {
         let pool = db::get_db();
         let conn = pool.lock();
-        let mut stmt = conn.prepare("SELECT github_issue_number FROM tasks WHERE id = ?1")
+        let mut stmt = conn
+            .prepare("SELECT github_issue_number FROM tasks WHERE id = ?1")
             .map_err(|e| e.to_string())?;
         stmt.query_row([task_id], |row| row.get(0))
             .map_err(|e| e.to_string())?
@@ -294,11 +315,21 @@ pub async fn github_close_issue(project_id: i64, task_id: i64) -> Result<(), Str
 fn map_labels_to_type(labels: &[github::GitHubLabel]) -> String {
     for label in labels {
         let name = label.name.to_lowercase();
-        if name.contains("bug") || name.contains("fix") { return "bugfix".to_string(); }
-        if name.contains("refactor") { return "refactor".to_string(); }
-        if name.contains("doc") { return "docs".to_string(); }
-        if name.contains("test") { return "test".to_string(); }
-        if name.contains("chore") || name.contains("maintenance") { return "chore".to_string(); }
+        if name.contains("bug") || name.contains("fix") {
+            return "bugfix".to_string();
+        }
+        if name.contains("refactor") {
+            return "refactor".to_string();
+        }
+        if name.contains("doc") {
+            return "docs".to_string();
+        }
+        if name.contains("test") {
+            return "test".to_string();
+        }
+        if name.contains("chore") || name.contains("maintenance") {
+            return "chore".to_string();
+        }
     }
     "feature".to_string()
 }

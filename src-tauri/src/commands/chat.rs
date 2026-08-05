@@ -1,5 +1,5 @@
-use std::process::Stdio;
 use crate::db::{self, projects, tasks};
+use std::process::Stdio;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -19,14 +19,36 @@ pub async fn chat_send(
 
     // Build context about current project state
     let all_tasks = tasks::get_by_project(&db, project_id);
-    let running: Vec<_> = all_tasks.iter().filter(|t| t.status.as_deref() == Some("in_progress")).collect();
-    let backlog: Vec<_> = all_tasks.iter().filter(|t| t.status.as_deref() == Some("backlog")).collect();
-    let done: Vec<_> = all_tasks.iter().filter(|t| t.status.as_deref() == Some("done")).collect();
-    let failed: Vec<_> = all_tasks.iter().filter(|t| t.status.as_deref() == Some("failed")).collect();
+    let running: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| t.status.as_deref() == Some("in_progress"))
+        .collect();
+    let backlog: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| t.status.as_deref() == Some("backlog"))
+        .collect();
+    let done: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| t.status.as_deref() == Some("done"))
+        .collect();
+    let failed: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| t.status.as_deref() == Some("failed"))
+        .collect();
 
-    let task_summary: String = all_tasks.iter().take(30).map(|t| {
-        format!("- [{}] {} ({})", t.task_key.as_deref().unwrap_or(""), t.title, t.status.as_deref().unwrap_or("backlog"))
-    }).collect::<Vec<_>>().join("\n");
+    let task_summary: String = all_tasks
+        .iter()
+        .take(30)
+        .map(|t| {
+            format!(
+                "- [{}] {} ({})",
+                t.task_key.as_deref().unwrap_or(""),
+                t.title,
+                t.status.as_deref().unwrap_or("backlog")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let system_context = format!(
         r#"You are Claude Board's AI assistant. You help users manage their development tasks.
@@ -43,8 +65,13 @@ pub async fn chat_send(
 - When asked to summarize, analyze tasks and their statuses.
 - You can suggest task management actions but cannot execute them.
 - Use markdown formatting for readability."#,
-        project.name, project.working_dir,
-        all_tasks.len(), running.len(), backlog.len(), done.len(), failed.len(),
+        project.name,
+        project.working_dir,
+        all_tasks.len(),
+        running.len(),
+        backlog.len(),
+        done.len(),
+        failed.len(),
         task_summary,
     );
 
@@ -54,15 +81,24 @@ pub async fn chat_send(
     // Run Claude CLI in one-shot mode
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = crate::child_env::claude_command();
-        cmd.args(["-p", &prompt, "--model", &model_str, "--output-format", "text"])
-            .current_dir(&project.working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
+        cmd.args([
+            "-p",
+            &prompt,
+            "--model",
+            &model_str,
+            "--output-format",
+            "text",
+        ])
+        .current_dir(&project.working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
 
-        let output = cmd.output().map_err(|e| format!("Failed to run Claude CLI: {}", e))?;
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run Claude CLI: {}", e))?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -70,7 +106,9 @@ pub async fn chat_send(
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(format!("Claude CLI error: {}", stderr.trim()))
         }
-    }).await.map_err(|e| format!("Task join error: {}", e))?;
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?;
 
     result
 }

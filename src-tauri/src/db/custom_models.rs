@@ -1,6 +1,6 @@
+use crate::db::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use crate::db::DbPool;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomModel {
@@ -39,7 +39,10 @@ pub fn list(db: &DbPool) -> Vec<CustomModel> {
     });
     match rows {
         Ok(it) => it.flatten().collect(),
-        Err(e) => { log::error!("custom_models query: {}", e); vec![] }
+        Err(e) => {
+            log::error!("custom_models query: {}", e);
+            vec![]
+        }
     }
 }
 

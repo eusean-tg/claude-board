@@ -1,15 +1,15 @@
+use crate::db::{self, activity, attachments, projects, settings, stats, tasks};
 /// Lightweight HTTP API for MCP server communication.
 /// The MCP server (Node.js sidecar) talks to this API to manage tasks.
 use axum::{
-    Router, Json,
     extract::{Path, Query},
-    routing::{get, patch},
     http::StatusCode,
     response::IntoResponse,
+    routing::{get, patch},
+    Json, Router,
 };
-use tower_http::cors::CorsLayer;
 use serde::Deserialize;
-use crate::db::{self, projects, tasks, stats, activity, attachments, settings};
+use tower_http::cors::CorsLayer;
 
 /// Helper: serialize to JSON Value, fallback to empty object on error.
 fn to_json<T: serde::Serialize>(val: &T) -> serde_json::Value {
@@ -23,8 +23,14 @@ pub async fn start_server(port: u16) {
         .route("/api/projects/summary", get(projects_summary))
         .route("/api/projects/{id}", get(get_project))
         // Tasks
-        .route("/api/projects/{project_id}/tasks", get(list_tasks).post(create_task))
-        .route("/api/tasks/{id}", get(get_task).put(update_task).delete(delete_task_handler))
+        .route(
+            "/api/projects/{project_id}/tasks",
+            get(list_tasks).post(create_task),
+        )
+        .route(
+            "/api/tasks/{id}",
+            get(get_task).put(update_task).delete(delete_task_handler),
+        )
         .route("/api/tasks/{id}/status", patch(change_status))
         .route("/api/tasks/{id}/detail", get(task_detail))
         .route("/api/tasks/{id}/logs", get(task_logs))
@@ -84,9 +90,15 @@ struct CreateTaskBody {
     parent_task_id: Option<i64>,
 }
 
-async fn create_task(Path(project_id): Path<i64>, Json(body): Json<CreateTaskBody>) -> impl IntoResponse {
+async fn create_task(
+    Path(project_id): Path<i64>,
+    Json(body): Json<CreateTaskBody>,
+) -> impl IntoResponse {
     let db = db::get_db();
-    let id = tasks::create(&db, project_id, &body.title,
+    let id = tasks::create(
+        &db,
+        project_id,
+        &body.title,
         body.description.as_deref().unwrap_or(""),
         body.priority.unwrap_or(0),
         body.task_type.as_deref().unwrap_or("feature"),
@@ -134,14 +146,26 @@ async fn update_task(Path(id): Path<i64>, Json(body): Json<UpdateTaskBody>) -> i
         Some(t) => t,
         None => return StatusCode::NOT_FOUND.into_response(),
     };
-    tasks::update(&db, id,
+    tasks::update(
+        &db,
+        id,
         body.title.as_deref().unwrap_or(&task.title),
-        body.description.as_deref().unwrap_or(task.description.as_deref().unwrap_or("")),
+        body.description
+            .as_deref()
+            .unwrap_or(task.description.as_deref().unwrap_or("")),
         body.priority.unwrap_or(task.priority.unwrap_or(0)),
-        body.task_type.as_deref().unwrap_or(task.task_type.as_deref().unwrap_or("feature")),
-        body.acceptance_criteria.as_deref().unwrap_or(task.acceptance_criteria.as_deref().unwrap_or("")),
-        body.model.as_deref().unwrap_or(task.model.as_deref().unwrap_or("sonnet")),
-        body.thinking_effort.as_deref().unwrap_or(task.thinking_effort.as_deref().unwrap_or("medium")),
+        body.task_type
+            .as_deref()
+            .unwrap_or(task.task_type.as_deref().unwrap_or("feature")),
+        body.acceptance_criteria
+            .as_deref()
+            .unwrap_or(task.acceptance_criteria.as_deref().unwrap_or("")),
+        body.model
+            .as_deref()
+            .unwrap_or(task.model.as_deref().unwrap_or("sonnet")),
+        body.thinking_effort
+            .as_deref()
+            .unwrap_or(task.thinking_effort.as_deref().unwrap_or("medium")),
         task.role_id,
         body.tags.as_deref().or(task.tags.as_deref()),
     );
@@ -182,7 +206,9 @@ async fn task_detail(Path(id): Path<i64>) -> impl IntoResponse {
     };
     let revisions = tasks::get_revisions(&db, id);
     let atts = attachments::get_by_task(&db, id);
-    let commits: serde_json::Value = task.commits.as_deref()
+    let commits: serde_json::Value = task
+        .commits
+        .as_deref()
         .and_then(|c| serde_json::from_str(c).ok())
         .unwrap_or(serde_json::json!([]));
 
@@ -196,7 +222,9 @@ async fn task_detail(Path(id): Path<i64>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct LogsQuery { limit: Option<i64> }
+struct LogsQuery {
+    limit: Option<i64>,
+}
 
 async fn task_logs(Path(id): Path<i64>, Query(q): Query<LogsQuery>) -> Json<serde_json::Value> {
     let mut logs = tasks::get_recent_logs(&db::get_db(), id, q.limit.unwrap_or(500));
@@ -223,10 +251,21 @@ async fn claude_usage() -> Json<serde_json::Value> {
 }
 
 #[derive(Deserialize)]
-struct ActivityQuery { limit: Option<i64>, offset: Option<i64> }
+struct ActivityQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
 
-async fn project_activity(Path(pid): Path<i64>, Query(q): Query<ActivityQuery>) -> Json<serde_json::Value> {
-    Json(to_json(&activity::get_by_project(&db::get_db(), pid, q.limit.unwrap_or(50), q.offset.unwrap_or(0))))
+async fn project_activity(
+    Path(pid): Path<i64>,
+    Query(q): Query<ActivityQuery>,
+) -> Json<serde_json::Value> {
+    Json(to_json(&activity::get_by_project(
+        &db::get_db(),
+        pid,
+        q.limit.unwrap_or(50),
+        q.offset.unwrap_or(0),
+    )))
 }
 
 async fn auth_status() -> Json<serde_json::Value> {
@@ -240,12 +279,24 @@ async fn get_settings() -> Json<serde_json::Value> {
 async fn update_settings(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let db = db::get_db();
     let mut current = settings::get(&db);
-    if let Some(v) = body.get("confirm_before_delete").and_then(|v| v.as_bool()) { current.confirm_before_delete = v; }
-    if let Some(v) = body.get("default_model").and_then(|v| v.as_str()) { current.default_model = v.to_string(); }
-    if let Some(v) = body.get("default_effort").and_then(|v| v.as_str()) { current.default_effort = v.to_string(); }
-    if let Some(v) = body.get("language").and_then(|v| v.as_str()) { current.language = v.to_string(); }
-    if let Some(v) = body.get("auto_open_terminal").and_then(|v| v.as_bool()) { current.auto_open_terminal = v; }
-    if let Some(v) = body.get("sound_enabled").and_then(|v| v.as_bool()) { current.sound_enabled = v; }
+    if let Some(v) = body.get("confirm_before_delete").and_then(|v| v.as_bool()) {
+        current.confirm_before_delete = v;
+    }
+    if let Some(v) = body.get("default_model").and_then(|v| v.as_str()) {
+        current.default_model = v.to_string();
+    }
+    if let Some(v) = body.get("default_effort").and_then(|v| v.as_str()) {
+        current.default_effort = v.to_string();
+    }
+    if let Some(v) = body.get("language").and_then(|v| v.as_str()) {
+        current.language = v.to_string();
+    }
+    if let Some(v) = body.get("auto_open_terminal").and_then(|v| v.as_bool()) {
+        current.auto_open_terminal = v;
+    }
+    if let Some(v) = body.get("sound_enabled").and_then(|v| v.as_bool()) {
+        current.sound_enabled = v;
+    }
     settings::update(&db, &current);
     Json(to_json(&current))
 }

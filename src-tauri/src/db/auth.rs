@@ -1,6 +1,6 @@
-use rusqlite::params;
-use sha2::{Sha256, Digest};
 use super::DbPool;
+use rusqlite::params;
+use sha2::{Digest, Sha256};
 
 fn hash_key(key: &str) -> String {
     let mut hasher = Sha256::new();
@@ -44,7 +44,10 @@ pub fn validate_key(db: &DbPool, token: &str) -> bool {
     let stored: Option<(i64, String)> = conn
         .prepare("SELECT enabled, api_key_hash FROM auth_config WHERE id=1")
         .ok()
-        .and_then(|mut s| s.query_row([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?))).ok());
+        .and_then(|mut s| {
+            s.query_row([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))
+                .ok()
+        });
     match stored {
         Some((enabled, hash)) => enabled == 1 && hash_key(token) == hash,
         None => false,

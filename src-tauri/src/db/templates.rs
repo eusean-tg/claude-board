@@ -1,6 +1,6 @@
+use super::DbPool;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use super::DbPool;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
@@ -19,24 +19,36 @@ pub struct Template {
 
 fn row_to(row: &rusqlite::Row) -> rusqlite::Result<Template> {
     Ok(Template {
-        id: row.get("id")?, project_id: row.get("project_id")?,
-        name: row.get("name")?, description: row.get("description")?,
-        template: row.get("template")?, variables: row.get("variables")?,
-        task_type: row.get("task_type")?, model: row.get("model")?,
+        id: row.get("id")?,
+        project_id: row.get("project_id")?,
+        name: row.get("name")?,
+        description: row.get("description")?,
+        template: row.get("template")?,
+        variables: row.get("variables")?,
+        task_type: row.get("task_type")?,
+        model: row.get("model")?,
         thinking_effort: row.get("thinking_effort")?,
-        created_at: row.get("created_at")?, updated_at: row.get("updated_at")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
     })
 }
 
 pub fn get_by_project(db: &DbPool, pid: i64) -> Vec<Template> {
     let conn = db.lock();
-    let mut stmt = match conn.prepare("SELECT * FROM prompt_templates WHERE project_id=?1 ORDER BY id") {
-        Ok(s) => s,
-        Err(e) => { log::error!("get_by_project: {}", e); return vec![]; }
-    };
+    let mut stmt =
+        match conn.prepare("SELECT * FROM prompt_templates WHERE project_id=?1 ORDER BY id") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("get_by_project: {}", e);
+                return vec![];
+            }
+        };
     let result = match stmt.query_map(params![pid], row_to) {
         Ok(rows) => rows.flatten().collect(),
-        Err(e) => { log::error!("get_by_project: {}", e); vec![] }
+        Err(e) => {
+            log::error!("get_by_project: {}", e);
+            vec![]
+        }
     };
     result
 }
@@ -45,7 +57,10 @@ pub fn get_by_id(db: &DbPool, id: i64) -> Option<Template> {
     let conn = db.lock();
     let mut stmt = match conn.prepare("SELECT * FROM prompt_templates WHERE id=?1") {
         Ok(s) => s,
-        Err(e) => { log::error!("get_by_id: {}", e); return None; }
+        Err(e) => {
+            log::error!("get_by_id: {}", e);
+            return None;
+        }
     };
     stmt.query_row(params![id], row_to).ok()
 }
@@ -57,12 +72,24 @@ pub fn find_for_task(db: &DbPool, project_id: i64, task_type: &str) -> Option<Te
     let exact = conn.prepare("SELECT * FROM prompt_templates WHERE project_id=?1 AND task_type=?2 ORDER BY id DESC LIMIT 1")
         .ok()
         .and_then(|mut s| s.query_row(params![project_id, task_type], row_to).ok());
-    if exact.is_some() { return exact; }
+    if exact.is_some() {
+        return exact;
+    }
     None
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn create(db: &DbPool, pid: i64, name: &str, description: Option<&str>, template: &str, variables: Option<&str>, task_type: &str, model: &str, thinking_effort: &str) -> i64 {
+pub fn create(
+    db: &DbPool,
+    pid: i64,
+    name: &str,
+    description: Option<&str>,
+    template: &str,
+    variables: Option<&str>,
+    task_type: &str,
+    model: &str,
+    thinking_effort: &str,
+) -> i64 {
     let conn = db.lock();
     match conn.execute(
         "INSERT INTO prompt_templates (project_id,name,description,template,variables,task_type,model,thinking_effort) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -75,7 +102,17 @@ pub fn create(db: &DbPool, pid: i64, name: &str, description: Option<&str>, temp
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn update(db: &DbPool, id: i64, name: &str, description: Option<&str>, template: &str, variables: Option<&str>, task_type: &str, model: &str, thinking_effort: &str) {
+pub fn update(
+    db: &DbPool,
+    id: i64,
+    name: &str,
+    description: Option<&str>,
+    template: &str,
+    variables: Option<&str>,
+    task_type: &str,
+    model: &str,
+    thinking_effort: &str,
+) {
     let conn = db.lock();
     if let Err(e) = conn.execute(
         "UPDATE prompt_templates SET name=?1,description=?2,template=?3,variables=?4,task_type=?5,model=?6,thinking_effort=?7,updated_at=datetime('now','localtime') WHERE id=?8",
@@ -85,5 +122,7 @@ pub fn update(db: &DbPool, id: i64, name: &str, description: Option<&str>, templ
 
 pub fn delete(db: &DbPool, id: i64) {
     let conn = db.lock();
-    if let Err(e) = conn.execute("DELETE FROM prompt_templates WHERE id=?1", params![id]) { log::error!("delete: {}", e); }
+    if let Err(e) = conn.execute("DELETE FROM prompt_templates WHERE id=?1", params![id]) {
+        log::error!("delete: {}", e);
+    }
 }

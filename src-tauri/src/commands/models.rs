@@ -12,18 +12,84 @@ pub use crate::services::model_catalog::ModelEntry;
 pub fn default_seed_models() -> Vec<(&'static str, &'static str, &'static str, f64, f64)> {
     vec![
         // ── Aliases (track latest) ──
-        ("haiku", "Haiku (latest)", "bg-green-500/20 text-green-300", 1.0, 5.0),
-        ("sonnet", "Sonnet (latest)", "bg-blue-500/20 text-blue-300", 3.0, 15.0),
-        ("opus", "Opus (latest)", "bg-purple-500/20 text-purple-300", 5.0, 25.0),
+        (
+            "haiku",
+            "Haiku (latest)",
+            "bg-green-500/20 text-green-300",
+            1.0,
+            5.0,
+        ),
+        (
+            "sonnet",
+            "Sonnet (latest)",
+            "bg-blue-500/20 text-blue-300",
+            3.0,
+            15.0,
+        ),
+        (
+            "opus",
+            "Opus (latest)",
+            "bg-purple-500/20 text-purple-300",
+            5.0,
+            25.0,
+        ),
         // ── Pinned versions ──
-        ("claude-haiku-4-5", "Haiku 4.5", "bg-green-500/20 text-green-300", 1.0, 5.0),
-        ("claude-sonnet-4-6", "Sonnet 4.6", "bg-blue-500/20 text-blue-300", 3.0, 15.0),
-        ("claude-opus-4-6", "Opus 4.6", "bg-purple-500/20 text-purple-300", 5.0, 25.0),
-        ("claude-opus-4-7", "Opus 4.7", "bg-purple-500/20 text-purple-300", 5.0, 25.0),
-        ("claude-opus-4-7[1m]", "Opus 4.7 (1M context)", "bg-fuchsia-500/20 text-fuchsia-300", 5.0, 25.0),
-        ("claude-opus-4-8", "Opus 4.8", "bg-purple-500/20 text-purple-300", 5.0, 25.0),
-        ("claude-opus-4-8[1m]", "Opus 4.8 (1M context)", "bg-fuchsia-500/20 text-fuchsia-300", 5.0, 25.0),
-        ("claude-fable-5", "Fable 5", "bg-amber-500/20 text-amber-300", 10.0, 50.0),
+        (
+            "claude-haiku-4-5",
+            "Haiku 4.5",
+            "bg-green-500/20 text-green-300",
+            1.0,
+            5.0,
+        ),
+        (
+            "claude-sonnet-4-6",
+            "Sonnet 4.6",
+            "bg-blue-500/20 text-blue-300",
+            3.0,
+            15.0,
+        ),
+        (
+            "claude-opus-4-6",
+            "Opus 4.6",
+            "bg-purple-500/20 text-purple-300",
+            5.0,
+            25.0,
+        ),
+        (
+            "claude-opus-4-7",
+            "Opus 4.7",
+            "bg-purple-500/20 text-purple-300",
+            5.0,
+            25.0,
+        ),
+        (
+            "claude-opus-4-7[1m]",
+            "Opus 4.7 (1M context)",
+            "bg-fuchsia-500/20 text-fuchsia-300",
+            5.0,
+            25.0,
+        ),
+        (
+            "claude-opus-4-8",
+            "Opus 4.8",
+            "bg-purple-500/20 text-purple-300",
+            5.0,
+            25.0,
+        ),
+        (
+            "claude-opus-4-8[1m]",
+            "Opus 4.8 (1M context)",
+            "bg-fuchsia-500/20 text-fuchsia-300",
+            5.0,
+            25.0,
+        ),
+        (
+            "claude-fable-5",
+            "Fable 5",
+            "bg-amber-500/20 text-amber-300",
+            10.0,
+            50.0,
+        ),
     ]
 }
 
@@ -42,7 +108,11 @@ pub fn merge_catalog(
         .filter(|u| !overridden.contains(&u.value) && !tombstones.contains(&u.value))
         .collect();
     out.extend(custom);
-    out.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then_with(|| a.value.cmp(&b.value)));
+    out.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.value.cmp(&b.value))
+    });
     out
 }
 
@@ -106,21 +176,34 @@ pub fn add_custom_model(
 ) -> Result<custom_models::CustomModel, String> {
     let model_id = model_id.trim();
     let label = label.trim();
-    if model_id.is_empty() { return Err("Model id is required".into()); }
-    if label.is_empty() { return Err("Label is required".into()); }
+    if model_id.is_empty() {
+        return Err("Model id is required".into());
+    }
+    if label.is_empty() {
+        return Err("Label is required".into());
+    }
 
     let db = db::get_db();
     // Overriding an upstream model is allowed: only a second *custom* row for the
     // same id is rejected.
-    if custom_models::list(&db).iter().any(|m| m.model_id == model_id) {
+    if custom_models::list(&db)
+        .iter()
+        .any(|m| m.model_id == model_id)
+    {
         return Err("A model with this id already exists".into());
     }
     let id = custom_models::create(
-        &db, model_id, label, color.as_deref(),
-        input_cost_per_mtok, output_cost_per_mtok,
+        &db,
+        model_id,
+        label,
+        color.as_deref(),
+        input_cost_per_mtok,
+        output_cost_per_mtok,
         sort_order.unwrap_or(0),
     )?;
-    custom_models::list(&db).into_iter().find(|m| m.id == id)
+    custom_models::list(&db)
+        .into_iter()
+        .find(|m| m.id == id)
         .ok_or_else(|| "Failed to fetch created model".into())
 }
 
@@ -136,23 +219,37 @@ pub fn update_custom_model(
 ) -> Result<custom_models::CustomModel, String> {
     let model_id = model_id.trim();
     let label = label.trim();
-    if model_id.is_empty() { return Err("Model id is required".into()); }
-    if label.is_empty() { return Err("Label is required".into()); }
+    if model_id.is_empty() {
+        return Err("Model id is required".into());
+    }
+    if label.is_empty() {
+        return Err("Label is required".into());
+    }
 
     let db = db::get_db();
     custom_models::update(
-        &db, id, model_id, label, color.as_deref(),
-        input_cost_per_mtok, output_cost_per_mtok,
+        &db,
+        id,
+        model_id,
+        label,
+        color.as_deref(),
+        input_cost_per_mtok,
+        output_cost_per_mtok,
         sort_order.unwrap_or(0),
     )?;
-    custom_models::list(&db).into_iter().find(|m| m.id == id)
+    custom_models::list(&db)
+        .into_iter()
+        .find(|m| m.id == id)
         .ok_or_else(|| "Failed to fetch updated model".into())
 }
 
 /// Drops the user's override row for `model_id` if there is one. Shared by
 /// delete (which then tombstones) and reset (which then clears the tombstone).
 fn drop_override(db: &db::DbPool, model_id: &str) -> Result<(), String> {
-    if let Some(row) = custom_models::list(db).into_iter().find(|m| m.model_id == model_id) {
+    if let Some(row) = custom_models::list(db)
+        .into_iter()
+        .find(|m| m.model_id == model_id)
+    {
         custom_models::delete(db, row.id)?;
     }
     Ok(())
@@ -343,8 +440,16 @@ mod lifecycle_tests {
     fn an_override_survives_a_resync_and_reset_restores_upstream() {
         let db = pool();
         sync(&db);
-        custom_models::create(&db, "claude-opus-4-8", "My Opus", None, Some(1.0), Some(2.0), 30)
-            .unwrap();
+        custom_models::create(
+            &db,
+            "claude-opus-4-8",
+            "My Opus",
+            None,
+            Some(1.0),
+            Some(2.0),
+            30,
+        )
+        .unwrap();
 
         let priced = |db: &db::DbPool| {
             let custom = custom_models::list(db);
@@ -381,8 +486,16 @@ mod lifecycle_tests {
         assert!(!visible(&db).contains(&"claude-opus-4-8".to_string()));
 
         // Re-adding it as a custom row must beat the tombstone.
-        custom_models::create(&db, "claude-opus-4-8", "Back", None, Some(5.0), Some(25.0), 30)
-            .unwrap();
+        custom_models::create(
+            &db,
+            "claude-opus-4-8",
+            "Back",
+            None,
+            Some(5.0),
+            Some(25.0),
+            30,
+        )
+        .unwrap();
         assert!(visible(&db).contains(&"claude-opus-4-8".to_string()));
     }
 

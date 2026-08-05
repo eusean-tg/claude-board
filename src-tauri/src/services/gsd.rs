@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
-use serde::{Serialize, Deserialize};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -55,31 +55,52 @@ pub const PHASE_STATUSES: &[&str] = &[
 pub fn normalize_phase_status(raw: &str) -> &'static str {
     let cleaned: String = raw
         .chars()
-        .filter(|c| !matches!(c, '✅' | '⏳' | '🔄' | '❌' | '⚪' | '🚫' | '🔴' | '🟢' | '🟡' | '🔵' | '⏸'))
+        .filter(|c| {
+            !matches!(
+                c,
+                '✅' | '⏳' | '🔄' | '❌' | '⚪' | '🚫' | '🔴' | '🟢' | '🟡' | '🔵' | '⏸'
+            )
+        })
         .collect();
     let trimmed = cleaned.trim().trim_matches(['*', '`', ':', '-', ' ', '\t']);
     let lower = trimmed.to_lowercase();
 
     if lower.is_empty() {
         // Emoji-only status lines
-        if raw.contains('✅') { return PHASE_STATUS_COMPLETED; }
-        if raw.contains('❌') { return PHASE_STATUS_FAILED; }
-        if raw.contains("🔄") || raw.contains("⏳") { return PHASE_STATUS_IN_PROGRESS; }
-        if raw.contains("🚫") { return PHASE_STATUS_BLOCKED; }
-        if raw.contains("⏸") { return PHASE_STATUS_PAUSED_FALLBACK; }
+        if raw.contains('✅') {
+            return PHASE_STATUS_COMPLETED;
+        }
+        if raw.contains('❌') {
+            return PHASE_STATUS_FAILED;
+        }
+        if raw.contains("🔄") || raw.contains("⏳") {
+            return PHASE_STATUS_IN_PROGRESS;
+        }
+        if raw.contains("🚫") {
+            return PHASE_STATUS_BLOCKED;
+        }
+        if raw.contains("⏸") {
+            return PHASE_STATUS_PAUSED_FALLBACK;
+        }
         return PHASE_STATUS_PENDING;
     }
 
     // Exact matches first (fast path, authoritative)
     for canon in PHASE_STATUSES {
-        if lower == *canon { return canon; }
+        if lower == *canon {
+            return canon;
+        }
     }
 
     // Fuzzy matching on common variants
     if lower.contains("complete") || lower == "done" || lower == "finished" {
         return PHASE_STATUS_COMPLETED;
     }
-    if lower.contains("progress") || lower.contains("active") || lower == "running" || lower == "executing" {
+    if lower.contains("progress")
+        || lower.contains("active")
+        || lower == "running"
+        || lower == "executing"
+    {
         return PHASE_STATUS_IN_PROGRESS;
     }
     if lower.contains("plan") {
@@ -118,13 +139,13 @@ pub struct GsdRoadmap {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HealthCheck {
     pub name: String,
-    pub status: String,  // "ok" | "warning" | "error"
+    pub status: String, // "ok" | "warning" | "error"
     pub message: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HealthReport {
-    pub overall: String,  // "healthy" | "degraded" | "broken"
+    pub overall: String, // "healthy" | "degraded" | "broken"
     pub checks: Vec<HealthCheck>,
 }
 
@@ -141,9 +162,16 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
             status: "error".into(),
             message: Some("Directory not found — run /gsd:new-project to initialize".into()),
         });
-        return HealthReport { overall: "broken".into(), checks };
+        return HealthReport {
+            overall: "broken".into(),
+            checks,
+        };
     }
-    checks.push(HealthCheck { name: ".planning/ directory".into(), status: "ok".into(), message: None });
+    checks.push(HealthCheck {
+        name: ".planning/ directory".into(),
+        status: "ok".into(),
+        message: None,
+    });
 
     // Checks 2-6: required files
     let required_files: &[(&str, &str)] = &[
@@ -156,7 +184,11 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
     for (file, desc) in required_files {
         let p = planning_dir.join(file);
         checks.push(if p.exists() {
-            HealthCheck { name: format!("{} present", file), status: "ok".into(), message: None }
+            HealthCheck {
+                name: format!("{} present", file),
+                status: "ok".into(),
+                message: None,
+            }
         } else {
             HealthCheck {
                 name: format!("{} present", file),
@@ -178,7 +210,11 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
                         message: Some(format!("Invalid JSON: {}", e)),
                     });
                 } else {
-                    checks.push(HealthCheck { name: "config.json parses".into(), status: "ok".into(), message: None });
+                    checks.push(HealthCheck {
+                        name: "config.json parses".into(),
+                        status: "ok".into(),
+                        message: None,
+                    });
                 }
             }
             Err(e) => checks.push(HealthCheck {
@@ -195,7 +231,9 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
             checks.push(HealthCheck {
                 name: "ROADMAP.md phases".into(),
                 status: "warning".into(),
-                message: Some("No phases detected — check heading format (## Phase N: Title)".into()),
+                message: Some(
+                    "No phases detected — check heading format (## Phase N: Title)".into(),
+                ),
             });
         } else {
             checks.push(HealthCheck {
@@ -213,7 +251,11 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
                 }
             }
             if dupes.is_empty() {
-                checks.push(HealthCheck { name: "Phase numbers unique".into(), status: "ok".into(), message: None });
+                checks.push(HealthCheck {
+                    name: "Phase numbers unique".into(),
+                    status: "ok".into(),
+                    message: None,
+                });
             } else {
                 checks.push(HealthCheck {
                     name: "Phase numbers unique".into(),
@@ -223,17 +265,26 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
             }
 
             // Check 10: each phase has canonical status
-            let non_canonical: Vec<String> = roadmap.phases.iter()
+            let non_canonical: Vec<String> = roadmap
+                .phases
+                .iter()
                 .filter(|p| !PHASE_STATUSES.contains(&p.status.as_str()))
                 .map(|p| format!("Phase {}: '{}'", p.number, p.status))
                 .collect();
             if non_canonical.is_empty() {
-                checks.push(HealthCheck { name: "Phase statuses canonical".into(), status: "ok".into(), message: None });
+                checks.push(HealthCheck {
+                    name: "Phase statuses canonical".into(),
+                    status: "ok".into(),
+                    message: None,
+                });
             } else {
                 checks.push(HealthCheck {
                     name: "Phase statuses canonical".into(),
                     status: "warning".into(),
-                    message: Some(format!("Non-canonical values: {}", non_canonical.join("; "))),
+                    message: Some(format!(
+                        "Non-canonical values: {}",
+                        non_canonical.join("; ")
+                    )),
                 });
             }
         }
@@ -242,9 +293,18 @@ pub fn run_health_checks(working_dir: &str) -> HealthReport {
     // Overall verdict: error > warning > ok
     let has_error = checks.iter().any(|c| c.status == "error");
     let has_warning = checks.iter().any(|c| c.status == "warning");
-    let overall = if has_error { "broken" } else if has_warning { "degraded" } else { "healthy" };
+    let overall = if has_error {
+        "broken"
+    } else if has_warning {
+        "degraded"
+    } else {
+        "healthy"
+    };
 
-    HealthReport { overall: overall.into(), checks }
+    HealthReport {
+        overall: overall.into(),
+        checks,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -311,7 +371,10 @@ pub fn check_status(working_dir: &str) -> GsdStatus {
 
 fn check_gsd_installed(working_dir: &str) -> bool {
     // Check local .claude/commands/gsd/ directory
-    let local_gsd = Path::new(working_dir).join(".claude").join("commands").join("gsd");
+    let local_gsd = Path::new(working_dir)
+        .join(".claude")
+        .join("commands")
+        .join("gsd");
     if local_gsd.is_dir() {
         return true;
     }
@@ -337,7 +400,11 @@ pub fn install(working_dir: &str, scope: &str) -> Result<String, String> {
         _ => "--global",
     };
 
-    let npx = if cfg!(target_os = "windows") { "npx.cmd" } else { "npx" };
+    let npx = if cfg!(target_os = "windows") {
+        "npx.cmd"
+    } else {
+        "npx"
+    };
     let mut cmd = crate::child_env::command(npx);
     cmd.args(["get-shit-done-cc@latest", "--claude", flag])
         .current_dir(working_dir)
@@ -346,7 +413,9 @@ pub fn install(working_dir: &str, scope: &str) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let output = cmd.output().map_err(|e| format!("Failed to run npx: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run npx: {}", e))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -419,9 +488,18 @@ pub fn recompute_phase_status_from_tasks(
         return None;
     }
     let total = task_statuses.len();
-    let done = task_statuses.iter().filter(|s| s.as_str() == "done").count();
-    let active = task_statuses.iter().filter(|s| matches!(s.as_str(), "in_progress" | "testing")).count();
-    let failed = task_statuses.iter().filter(|s| s.as_str() == "failed").count();
+    let done = task_statuses
+        .iter()
+        .filter(|s| s.as_str() == "done")
+        .count();
+    let active = task_statuses
+        .iter()
+        .filter(|s| matches!(s.as_str(), "in_progress" | "testing"))
+        .count();
+    let failed = task_statuses
+        .iter()
+        .filter(|s| s.as_str() == "failed")
+        .count();
 
     let new_status: &'static str = if done == total {
         PHASE_STATUS_COMPLETED
@@ -440,7 +518,12 @@ pub fn recompute_phase_status_from_tasks(
     if update_roadmap_phase_status(working_dir, phase_number, new_status) {
         log::info!(
             "gsd: phase {} → {} in ROADMAP.md ({}/{} done, {} active, {} failed)",
-            phase_number, new_status, done, total, active, failed
+            phase_number,
+            new_status,
+            done,
+            total,
+            active,
+            failed
         );
         Some(new_status.to_string())
     } else {
@@ -510,13 +593,15 @@ pub fn apply_task_status_cascade(
             } else {
                 log::warn!(
                     "gsd::apply_task_status_cascade[db]: plan {} points to missing phase {}",
-                    plan_id, plan.phase_id
+                    plan_id,
+                    plan.phase_id
                 );
             }
         } else {
             log::warn!(
                 "gsd::apply_task_status_cascade[db]: task {} references missing plan {}",
-                task_id, plan_id
+                task_id,
+                plan_id
             );
         }
     }
@@ -528,7 +613,8 @@ pub fn apply_task_status_cascade(
             None => {
                 log::warn!(
                     "gsd::apply_task_status_cascade[file]: project {} not found for task {}",
-                    task.project_id, task_id
+                    task.project_id,
+                    task_id
                 );
                 return;
             }
@@ -542,8 +628,7 @@ pub fn apply_task_status_cascade(
             .filter_map(|t| t.status)
             .collect();
 
-        if recompute_phase_status_from_tasks(&project.working_dir, &phase_num, &statuses)
-            .is_some()
+        if recompute_phase_status_from_tasks(&project.working_dir, &phase_num, &statuses).is_some()
         {
             if let Some(a) = app {
                 a.emit("roadmap:updated", &task.project_id).ok();
@@ -555,7 +640,11 @@ pub fn apply_task_status_cascade(
 /// Update the Status: line for a given phase in ROADMAP.md. If no Status line
 /// exists under the phase heading, inserts one immediately after the heading.
 /// Returns true when the file was rewritten.
-pub fn update_roadmap_phase_status(working_dir: &str, phase_number: &str, new_status: &str) -> bool {
+pub fn update_roadmap_phase_status(
+    working_dir: &str,
+    phase_number: &str,
+    new_status: &str,
+) -> bool {
     let path = Path::new(working_dir).join(".planning").join("ROADMAP.md");
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -600,9 +689,13 @@ pub fn update_roadmap_phase_status(working_dir: &str, phase_number: &str, new_st
         if in_target && pending_insert && parse_status_line(trimmed).is_some() {
             let leading: String = raw.chars().take_while(|c| c.is_whitespace()).collect();
             let after = &raw[leading.len()..];
-            let bullet = if after.starts_with("- ") { "- " }
-                else if after.starts_with("* ") { "* " }
-                else { "" };
+            let bullet = if after.starts_with("- ") {
+                "- "
+            } else if after.starts_with("* ") {
+                "* "
+            } else {
+                ""
+            };
             out.push(format!("{}{}**Status:** {}", leading, bullet, new_status));
             pending_insert = false;
             done = true;
@@ -716,9 +809,17 @@ fn parse_phase_header(line: &str) -> Option<GsdPhase> {
     let line = line.trim_start_matches('#').trim();
 
     // "Phase N: Title" or "Phase N - Title" — require a digit after "Phase "
-    if let Some(rest) = line.strip_prefix("Phase ").or_else(|| line.strip_prefix("phase ")) {
+    if let Some(rest) = line
+        .strip_prefix("Phase ")
+        .or_else(|| line.strip_prefix("phase "))
+    {
         // Must start with a digit (skip "Phase Details", "Phase Numbering", etc.)
-        if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             let (num, title) = split_phase_number_title(rest);
             if !title.is_empty() {
                 return Some(GsdPhase {
@@ -735,10 +836,16 @@ fn parse_phase_header(line: &str) -> Option<GsdPhase> {
 }
 
 fn split_phase_number_title(s: &str) -> (String, String) {
-    let num: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let num: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     let rest = s[num.len()..].trim();
     let rest = rest.trim_start_matches(['.', ':', '-', ' ']);
-    (num.trim_end_matches('.').to_string(), rest.trim().to_string())
+    (
+        num.trim_end_matches('.').to_string(),
+        rest.trim().to_string(),
+    )
 }
 
 fn parse_status_line(line: &str) -> Option<String> {
@@ -753,7 +860,12 @@ fn parse_status_line(line: &str) -> Option<String> {
     }
 
     // Emoji-only lines (no "Status:" prefix) — treat as implicit status markers
-    if line.contains('✅') || line.contains('❌') || line.contains('⏳') || line.contains("🔄") || line.contains("🚫") {
+    if line.contains('✅')
+        || line.contains('❌')
+        || line.contains('⏳')
+        || line.contains("🔄")
+        || line.contains("🚫")
+    {
         return Some(normalize_phase_status(line).to_string());
     }
 
@@ -775,11 +887,14 @@ pub fn read_state(working_dir: &str) -> Option<GsdState> {
 
         // Track sections
         if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
-            in_position_section = trimmed.contains("current position") || trimmed.contains("position");
+            in_position_section =
+                trimmed.contains("current position") || trimmed.contains("position");
         }
 
         // "Phase: 1 of 5 (Foundation...)" or "Current Phase: ..."
-        if (trimmed.starts_with("phase:") || trimmed.contains("current phase") || trimmed.contains("active phase"))
+        if (trimmed.starts_with("phase:")
+            || trimmed.contains("current phase")
+            || trimmed.contains("active phase"))
             && current_phase.is_none()
         {
             current_phase = extract_value(line);
@@ -792,7 +907,10 @@ pub fn read_state(working_dir: &str) -> Option<GsdState> {
         {
             current_step = extract_value(line);
         }
-        if trimmed.contains("current step") || trimmed.contains("next step") || trimmed.contains("next action") {
+        if trimmed.contains("current step")
+            || trimmed.contains("next step")
+            || trimmed.contains("next action")
+        {
             current_step = extract_value(line);
         }
     }
@@ -808,7 +926,11 @@ fn extract_value(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.splitn(2, ':').collect();
     if parts.len() == 2 {
         let val = parts[1].trim().trim_matches(['*', '`', ' ']).to_string();
-        if !val.is_empty() { Some(val) } else { None }
+        if !val.is_empty() {
+            Some(val)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -863,11 +985,18 @@ pub fn read_phase_details(working_dir: &str) -> Vec<GsdPhaseDetail> {
             let fname = fe.file_name().to_string_lossy().to_string();
             if fname.ends_with(".md") {
                 let content = std::fs::read_to_string(fe.path()).unwrap_or_default();
-                files.push(GsdPhaseFile { name: fname, content });
+                files.push(GsdPhaseFile {
+                    name: fname,
+                    content,
+                });
             }
         }
 
-        details.push(GsdPhaseDetail { number, name, files });
+        details.push(GsdPhaseDetail {
+            number,
+            name,
+            files,
+        });
     }
 
     details
@@ -876,12 +1005,19 @@ pub fn read_phase_details(working_dir: &str) -> Vec<GsdPhaseDetail> {
 fn parse_phase_dir_name(name: &str) -> (String, String) {
     let lower = name.to_lowercase();
     // Format: "phase-1", "phase-01", "phase-1-title"
-    if let Some(rest) = lower.strip_prefix("phase-").or_else(|| lower.strip_prefix("phase")) {
+    if let Some(rest) = lower
+        .strip_prefix("phase-")
+        .or_else(|| lower.strip_prefix("phase"))
+    {
         let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         if !num.is_empty() {
             let after_num = &rest[num.len()..];
             let title = after_num.trim_start_matches('-').replace('-', " ");
-            let title = if title.is_empty() { format!("Phase {}", num) } else { title };
+            let title = if title.is_empty() {
+                format!("Phase {}", num)
+            } else {
+                title
+            };
             return (num, title);
         }
     }
@@ -1016,7 +1152,11 @@ fn split_front_matter(content: &str) -> (String, String) {
         if let Some(end) = content[3..].find("---") {
             let fm = content[3..3 + end].to_string();
             let body_start = 3 + end + 3;
-            let body = if body_start < content.len() { content[body_start..].to_string() } else { String::new() };
+            let body = if body_start < content.len() {
+                content[body_start..].to_string()
+            } else {
+                String::new()
+            };
             return (fm, body);
         }
     }
@@ -1028,7 +1168,9 @@ fn extract_yaml_str(yaml: &str, key: &str) -> Option<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(&format!("{}:", key)) {
             let val = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-            if !val.is_empty() { return Some(val); }
+            if !val.is_empty() {
+                return Some(val);
+            }
         }
     }
     None
@@ -1057,11 +1199,17 @@ fn extract_plan_number_from_filename(fname: &str) -> String {
     // "plan-1-xterm-upgrade" → "1"
     if let Some(rest) = stem.strip_prefix("plan-") {
         let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !num.is_empty() { return num; }
+        if !num.is_empty() {
+            return num;
+        }
     }
     // "01-02-PLAN" → "02"
     let parts: Vec<&str> = stem.split('-').collect();
-    if parts.len() >= 2 { parts[1].to_string() } else { parts[0].to_string() }
+    if parts.len() >= 2 {
+        parts[1].to_string()
+    } else {
+        parts[0].to_string()
+    }
 }
 
 fn extract_plan_title(body: &str) -> Option<String> {
@@ -1098,9 +1246,13 @@ fn extract_xml_tasks(body: &str) -> Vec<GsdPlanTask> {
                 let end = start + end_pos + 7;
                 let chunk = &body[start..end];
 
-                let task_type = extract_xml_attr(chunk, "type").unwrap_or_else(|| "auto".to_string());
+                let task_type =
+                    extract_xml_attr(chunk, "type").unwrap_or_else(|| "auto".to_string());
                 let checkpoint = if task_type.contains("checkpoint:") {
-                    task_type.strip_prefix("checkpoint:").unwrap_or("auto").to_string()
+                    task_type
+                        .strip_prefix("checkpoint:")
+                        .unwrap_or("auto")
+                        .to_string()
                 } else {
                     task_type.clone()
                 };
@@ -1120,7 +1272,11 @@ fn extract_xml_tasks(body: &str) -> Vec<GsdPlanTask> {
                         wave: 1,
                         depends_on: Vec::new(),
                         task_name: name,
-                        task_type: if task_type.contains("checkpoint") { "chore".to_string() } else { "feature".to_string() },
+                        task_type: if task_type.contains("checkpoint") {
+                            "chore".to_string()
+                        } else {
+                            "feature".to_string()
+                        },
                         files,
                         action,
                         verify,
@@ -1159,8 +1315,12 @@ fn extract_xml_tag(chunk: &str, tag: &str) -> Option<String> {
         if let Some(gt) = chunk[after_open..].find('>') {
             let content_start = after_open + gt + 1;
             if let Some(end_pos) = chunk[content_start..].find(&close) {
-                let val = chunk[content_start..content_start + end_pos].trim().to_string();
-                if !val.is_empty() { return Some(val); }
+                let val = chunk[content_start..content_start + end_pos]
+                    .trim()
+                    .to_string();
+                if !val.is_empty() {
+                    return Some(val);
+                }
             }
         }
     }
@@ -1195,13 +1355,17 @@ pub fn list_todos(working_dir: &str) -> Vec<GsdTodo> {
     let mut result: Vec<GsdTodo> = Vec::new();
     for status in &["pending", "done"] {
         let bucket = todos_dir.join(status);
-        if !bucket.exists() { continue; }
+        if !bucket.exists() {
+            continue;
+        }
         collect_todos_recursive(&bucket, &bucket, status, &mut result);
     }
     // Sort: pending first, then by filename
     result.sort_by(|a, b| {
         let status_cmp = a.status.cmp(&b.status).reverse(); // pending > done
-        if status_cmp != std::cmp::Ordering::Equal { return status_cmp; }
+        if status_cmp != std::cmp::Ordering::Equal {
+            return status_cmp;
+        }
         a.filename.cmp(&b.filename)
     });
     result
@@ -1217,13 +1381,20 @@ fn collect_todos_recursive(root: &Path, current: &Path, status: &str, out: &mut 
         if p.is_dir() {
             collect_todos_recursive(root, &p, status, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("md") {
-            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let filename = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
             // Area = first subdirectory under root (e.g. "general", "ui")
-            let area = p.strip_prefix(root).ok()
+            let area = p
+                .strip_prefix(root)
+                .ok()
                 .and_then(|rel| rel.components().next())
                 .and_then(|c| c.as_os_str().to_str())
                 .filter(|s| *s != filename)
-                .unwrap_or("general").to_string();
+                .unwrap_or("general")
+                .to_string();
 
             let content = std::fs::read_to_string(&p).unwrap_or_default();
             let (title, preview) = parse_todo_content(&content, &filename);
@@ -1243,27 +1414,41 @@ fn collect_todos_recursive(root: &Path, current: &Path, status: &str, out: &mut 
 fn parse_todo_content(content: &str, filename: &str) -> (String, String) {
     // Skip YAML frontmatter
     let body_start = if content.starts_with("---") {
-        content.find("\n---\n").or_else(|| content.find("\n---\r\n")).map(|i| i + 5).unwrap_or(0)
-    } else { 0 };
+        content
+            .find("\n---\n")
+            .or_else(|| content.find("\n---\r\n"))
+            .map(|i| i + 5)
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let body = content[body_start..].trim();
 
     // Try to extract a title: first `# Heading` line, then first non-empty line
-    let heading = body.lines()
+    let heading = body
+        .lines()
         .find(|l| l.trim_start().starts_with("# "))
         .map(|l| l.trim_start_matches('#').trim().to_string());
 
     let title = heading.unwrap_or_else(|| {
-        filename.trim_end_matches(".md").replace(['-', '_'], " ").trim().to_string()
+        filename
+            .trim_end_matches(".md")
+            .replace(['-', '_'], " ")
+            .trim()
+            .to_string()
     });
 
-    let preview: String = body.lines()
+    let preview: String = body
+        .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .take(3)
         .collect::<Vec<_>>()
         .join(" ")
-        .chars().take(200).collect();
+        .chars()
+        .take(200)
+        .collect();
 
     (title, preview)
 }
@@ -1284,10 +1469,16 @@ mod tests {
         assert_eq!(normalize_phase_status("Completed"), PHASE_STATUS_COMPLETED);
         assert_eq!(normalize_phase_status("complete"), PHASE_STATUS_COMPLETED);
         assert_eq!(normalize_phase_status("done"), PHASE_STATUS_COMPLETED);
-        assert_eq!(normalize_phase_status("In Progress"), PHASE_STATUS_IN_PROGRESS);
+        assert_eq!(
+            normalize_phase_status("In Progress"),
+            PHASE_STATUS_IN_PROGRESS
+        );
         assert_eq!(normalize_phase_status("active"), PHASE_STATUS_IN_PROGRESS);
         assert_eq!(normalize_phase_status("running"), PHASE_STATUS_IN_PROGRESS);
-        assert_eq!(normalize_phase_status("planning phase"), PHASE_STATUS_PLANNING);
+        assert_eq!(
+            normalize_phase_status("planning phase"),
+            PHASE_STATUS_PLANNING
+        );
         assert_eq!(normalize_phase_status("verifying"), PHASE_STATUS_VERIFYING);
         assert_eq!(normalize_phase_status("testing"), PHASE_STATUS_VERIFYING);
         assert_eq!(normalize_phase_status("FAILED"), PHASE_STATUS_FAILED);
@@ -1300,10 +1491,16 @@ mod tests {
 
     #[test]
     fn normalize_emoji_prefixes() {
-        assert_eq!(normalize_phase_status("✅ Completed"), PHASE_STATUS_COMPLETED);
+        assert_eq!(
+            normalize_phase_status("✅ Completed"),
+            PHASE_STATUS_COMPLETED
+        );
         assert_eq!(normalize_phase_status("✅"), PHASE_STATUS_COMPLETED);
         assert_eq!(normalize_phase_status("❌ failed"), PHASE_STATUS_FAILED);
-        assert_eq!(normalize_phase_status("🔄 in_progress"), PHASE_STATUS_IN_PROGRESS);
+        assert_eq!(
+            normalize_phase_status("🔄 in_progress"),
+            PHASE_STATUS_IN_PROGRESS
+        );
         assert_eq!(normalize_phase_status("⏳"), PHASE_STATUS_IN_PROGRESS);
         assert_eq!(normalize_phase_status("🚫 blocked"), PHASE_STATUS_BLOCKED);
     }
@@ -1317,8 +1514,14 @@ mod tests {
 
     #[test]
     fn normalize_handles_markdown_decorations() {
-        assert_eq!(normalize_phase_status("**completed**"), PHASE_STATUS_COMPLETED);
-        assert_eq!(normalize_phase_status("`in_progress`"), PHASE_STATUS_IN_PROGRESS);
+        assert_eq!(
+            normalize_phase_status("**completed**"),
+            PHASE_STATUS_COMPLETED
+        );
+        assert_eq!(
+            normalize_phase_status("`in_progress`"),
+            PHASE_STATUS_IN_PROGRESS
+        );
         assert_eq!(normalize_phase_status(": done"), PHASE_STATUS_COMPLETED);
     }
 }

@@ -1,18 +1,25 @@
-use rusqlite::params;
-use super::DbPool;
 use super::tasks::Task;
+use super::DbPool;
 use crate::error::AppError;
+use rusqlite::params;
 use std::collections::HashSet;
 
 /// Add a dependency edge: task_id depends on depends_on_id.
 /// condition_type: "always" (default), "on_success", "on_failure"
 /// Returns error if it would create a cycle.
-pub fn add_dependency(db: &DbPool, task_id: i64, depends_on_id: i64, condition_type: Option<&str>) -> Result<(), AppError> {
+pub fn add_dependency(
+    db: &DbPool,
+    task_id: i64,
+    depends_on_id: i64,
+    condition_type: Option<&str>,
+) -> Result<(), AppError> {
     if task_id == depends_on_id {
         return Err(AppError::Validation("Task cannot depend on itself".into()));
     }
     if detect_cycle(db, task_id, depends_on_id) {
-        return Err(AppError::Validation("Adding this dependency would create a cycle".into()));
+        return Err(AppError::Validation(
+            "Adding this dependency would create a cycle".into(),
+        ));
     }
     let ctype = condition_type.unwrap_or("always");
     let conn = db.lock();
@@ -36,19 +43,21 @@ pub fn remove_dependency(db: &DbPool, task_id: i64, depends_on_id: i64) -> Resul
 /// Remove all dependencies for a task (both as child and parent).
 pub fn remove_all_for_task(db: &DbPool, task_id: i64) -> Result<(), AppError> {
     let conn = db.lock();
-    conn.execute("DELETE FROM task_dependencies WHERE task_id=?1 OR depends_on_id=?1", params![task_id])?;
+    conn.execute(
+        "DELETE FROM task_dependencies WHERE task_id=?1 OR depends_on_id=?1",
+        params![task_id],
+    )?;
     Ok(())
 }
 
 /// Get parent task IDs (tasks that this task depends on).
 pub fn get_parent_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
     let conn = db.lock();
-    let mut stmt = match conn.prepare(
-        "SELECT depends_on_id FROM task_dependencies WHERE task_id=?1"
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
+    let mut stmt =
+        match conn.prepare("SELECT depends_on_id FROM task_dependencies WHERE task_id=?1") {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
     let result = match stmt.query_map(params![task_id], |r| r.get(0)) {
         Ok(rows) => rows.flatten().collect(),
         Err(_) => vec![],
@@ -59,12 +68,11 @@ pub fn get_parent_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
 /// Get child task IDs (tasks that depend on this task).
 pub fn get_child_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
     let conn = db.lock();
-    let mut stmt = match conn.prepare(
-        "SELECT task_id FROM task_dependencies WHERE depends_on_id=?1"
-    ) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
+    let mut stmt =
+        match conn.prepare("SELECT task_id FROM task_dependencies WHERE depends_on_id=?1") {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
     let result = match stmt.query_map(params![task_id], |r| r.get(0)) {
         Ok(rows) => rows.flatten().collect(),
         Err(_) => vec![],
@@ -81,8 +89,9 @@ pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
     // Count unmet dependencies using condition-aware logic:
     // "always" or "on_success" → parent.status IN ('done','testing')
     // "on_failure" → parent failed: status='failed'
-    let unmet: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM task_dependencies td
+    let unmet: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dependencies td
          JOIN tasks t ON t.id = td.depends_on_id
          WHERE td.task_id = ?1
          AND NOT (
@@ -95,9 +104,10 @@ pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
                      t.status IN ('done', 'testing')
              END
          )",
-        params![task_id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+            params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     unmet == 0
 }
 
@@ -155,12 +165,11 @@ fn detect_cycle(db: &DbPool, task_id: i64, depends_on_id: i64) -> bool {
         if !visited.insert(current) {
             continue;
         }
-        let mut stmt = match conn.prepare(
-            "SELECT depends_on_id FROM task_dependencies WHERE task_id=?1"
-        ) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let mut stmt =
+            match conn.prepare("SELECT depends_on_id FROM task_dependencies WHERE task_id=?1") {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
         let parents: Vec<i64> = match stmt.query_map(params![current], |r| r.get(0)) {
             Ok(rows) => rows.flatten().collect(),
             Err(_) => vec![],
@@ -189,12 +198,14 @@ pub fn get_execution_waves(db: &DbPool, project_id: i64) -> Vec<Vec<Task>> {
         }
     }
 
-    let pending: Vec<&Task> = all_tasks.iter()
+    let pending: Vec<&Task> = all_tasks
+        .iter()
         .filter(|t| matches!(t.status.as_deref(), Some("backlog") | Some("in_progress")))
         .collect();
 
     loop {
-        let wave: Vec<Task> = pending.iter()
+        let wave: Vec<Task> = pending
+            .iter()
             .filter(|t| !assigned.contains(&t.id))
             .filter(|t| {
                 let parents = get_parent_ids(db, t.id);
@@ -230,7 +241,11 @@ pub fn get_graph_data(db: &DbPool, project_id: i64) -> serde_json::Value {
             Err(_) => return serde_json::json!({ "tasks": all_tasks, "edges": [], "waves": [] }),
         };
         let rows: Vec<(i64, i64, String)> = match stmt.query_map(params![project_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2).unwrap_or_else(|_| "always".into())))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, String>(2).unwrap_or_else(|_| "always".into()),
+            ))
         }) {
             Ok(r) => r.flatten().collect(),
             Err(_) => vec![],

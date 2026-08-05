@@ -1,5 +1,5 @@
+use crate::db::{self, activity, dependencies, tasks as tq, workflows as wf};
 use tauri::{AppHandle, Emitter};
-use crate::db::{self, workflows as wf, tasks as tq, dependencies, activity};
 
 #[tauri::command]
 pub fn get_workflow_templates(project_id: i64) -> Vec<wf::WorkflowTemplate> {
@@ -8,20 +8,40 @@ pub fn get_workflow_templates(project_id: i64) -> Vec<wf::WorkflowTemplate> {
 
 #[tauri::command]
 pub fn create_workflow_template(
-    project_id: i64, name: String, description: Option<String>, steps: String,
+    project_id: i64,
+    name: String,
+    description: Option<String>,
+    steps: String,
 ) -> Result<wf::WorkflowTemplate, String> {
     let db = db::get_db();
-    if name.trim().is_empty() { return Err("Name is required".into()); }
-    let id = wf::create(&db, project_id, name.trim(), description.as_deref().unwrap_or(""), &steps);
+    if name.trim().is_empty() {
+        return Err("Name is required".into());
+    }
+    let id = wf::create(
+        &db,
+        project_id,
+        name.trim(),
+        description.as_deref().unwrap_or(""),
+        &steps,
+    );
     wf::get_by_id(&db, id).ok_or("Failed to create workflow template".into())
 }
 
 #[tauri::command]
 pub fn update_workflow_template(
-    id: i64, name: String, description: Option<String>, steps: String,
+    id: i64,
+    name: String,
+    description: Option<String>,
+    steps: String,
 ) -> Result<wf::WorkflowTemplate, String> {
     let db = db::get_db();
-    wf::update(&db, id, name.trim(), description.as_deref().unwrap_or(""), &steps);
+    wf::update(
+        &db,
+        id,
+        name.trim(),
+        description.as_deref().unwrap_or(""),
+        &steps,
+    );
     wf::get_by_id(&db, id).ok_or("Failed to update workflow template".into())
 }
 
@@ -32,18 +52,27 @@ pub fn delete_workflow_template(id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn apply_workflow_template(app: AppHandle, template_id: i64, project_id: i64) -> Result<Vec<tq::Task>, String> {
+pub fn apply_workflow_template(
+    app: AppHandle,
+    template_id: i64,
+    project_id: i64,
+) -> Result<Vec<tq::Task>, String> {
     let db = db::get_db();
     let template = wf::get_by_id(&db, template_id).ok_or("Template not found")?;
-    let steps: Vec<wf::WorkflowStep> = serde_json::from_str(template.steps.as_deref().unwrap_or("[]"))
-        .map_err(|e| format!("Invalid template steps: {}", e))?;
+    let steps: Vec<wf::WorkflowStep> =
+        serde_json::from_str(template.steps.as_deref().unwrap_or("[]"))
+            .map_err(|e| format!("Invalid template steps: {}", e))?;
 
-    if steps.is_empty() { return Err("Template has no steps".into()); }
+    if steps.is_empty() {
+        return Err("Template has no steps".into());
+    }
 
     // Create tasks for each step
     let mut created_ids: Vec<i64> = Vec::new();
     for step in &steps {
-        let task_id = tq::create(&db, project_id,
+        let task_id = tq::create(
+            &db,
+            project_id,
             &step.title,
             step.description.as_deref().unwrap_or(""),
             0, // priority
@@ -70,12 +99,23 @@ pub fn apply_workflow_template(app: AppHandle, template_id: i64, project_id: i64
     }
 
     // Collect created tasks
-    let tasks: Vec<tq::Task> = created_ids.iter()
+    let tasks: Vec<tq::Task> = created_ids
+        .iter()
         .filter_map(|id| tq::get_by_id(&db, *id))
         .collect();
 
-    activity::add(&db, project_id, None, "workflow_applied",
-        &format!("Workflow '{}' applied: {} tasks created", template.name, tasks.len()), None);
+    activity::add(
+        &db,
+        project_id,
+        None,
+        "workflow_applied",
+        &format!(
+            "Workflow '{}' applied: {} tasks created",
+            template.name,
+            tasks.len()
+        ),
+        None,
+    );
 
     for task in &tasks {
         app.emit("task:created", task).ok();

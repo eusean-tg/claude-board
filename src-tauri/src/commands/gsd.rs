@@ -1,6 +1,6 @@
-use tauri::{AppHandle, Emitter};
-use crate::db::{self, projects, tasks, dependencies};
+use crate::db::{self, dependencies, projects, tasks};
 use crate::services::gsd;
+use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
 pub fn gsd_check_status(project_id: i64) -> Result<gsd::GsdStatus, String> {
@@ -24,26 +24,40 @@ pub fn gsd_list_todos(project_id: i64) -> Result<Vec<gsd::GsdTodo>, String> {
 }
 
 #[tauri::command]
-pub async fn gsd_install(app: AppHandle, project_id: i64, scope: Option<String>) -> Result<String, String> {
+pub async fn gsd_install(
+    app: AppHandle,
+    project_id: i64,
+    scope: Option<String>,
+) -> Result<String, String> {
     let db = db::get_db();
     let project = projects::get_by_id(&db, project_id).ok_or("Project not found")?;
     let scope_str = scope.unwrap_or_else(|| "global".to_string());
     let working_dir = project.working_dir.clone();
 
-    app.emit("gsd:installing", &serde_json::json!({"projectId": project_id})).ok();
+    app.emit(
+        "gsd:installing",
+        &serde_json::json!({"projectId": project_id}),
+    )
+    .ok();
 
-    let result = tokio::task::spawn_blocking(move || {
-        gsd::install(&working_dir, &scope_str)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?;
+    let result = tokio::task::spawn_blocking(move || gsd::install(&working_dir, &scope_str))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?;
 
     match &result {
         Ok(msg) => {
-            app.emit("gsd:installed", &serde_json::json!({"projectId": project_id, "message": msg})).ok();
+            app.emit(
+                "gsd:installed",
+                &serde_json::json!({"projectId": project_id, "message": msg}),
+            )
+            .ok();
         }
         Err(msg) => {
-            app.emit("gsd:install_failed", &serde_json::json!({"projectId": project_id, "error": msg})).ok();
+            app.emit(
+                "gsd:install_failed",
+                &serde_json::json!({"projectId": project_id, "error": msg}),
+            )
+            .ok();
         }
     }
 
@@ -87,7 +101,10 @@ pub fn gsd_get_config(project_id: i64) -> Result<Option<serde_json::Value>, Stri
 
 /// Parse PLAN files for a phase and return extracted tasks (preview, no creation).
 #[tauri::command]
-pub fn gsd_parse_phase_plans(project_id: i64, phase_number: String) -> Result<Vec<gsd::GsdPlanTask>, String> {
+pub fn gsd_parse_phase_plans(
+    project_id: i64,
+    phase_number: String,
+) -> Result<Vec<gsd::GsdPlanTask>, String> {
     let db = db::get_db();
     let project = projects::get_by_id(&db, project_id).ok_or("Project not found")?;
     Ok(gsd::parse_phase_plans(&project.working_dir, &phase_number))
@@ -107,12 +124,16 @@ pub fn gsd_create_tasks_from_plans(
 
     let plan_tasks = gsd::parse_phase_plans(&project.working_dir, &phase_number);
     if plan_tasks.is_empty() {
-        return Err(format!("No tasks found in PLAN files for phase {}", phase_number));
+        return Err(format!(
+            "No tasks found in PLAN files for phase {}",
+            phase_number
+        ));
     }
 
     let mut created: Vec<tasks::Task> = Vec::new();
     // Track plan_number → task IDs for wave-based dependencies
-    let mut plan_to_task_ids: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    let mut plan_to_task_ids: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
 
     for pt in &plan_tasks {
         let title = format!("[P{}] {}", phase_number, pt.task_name);
@@ -130,7 +151,10 @@ pub fn gsd_create_tasks_from_plans(
             desc_parts.push(format!("\n**Done:** {}", pt.done_criteria));
         }
         let description = desc_parts.join("\n");
-        let tags = format!("gsd,phase-{},plan-{},wave-{}", phase_number, pt.plan_number, pt.wave);
+        let tags = format!(
+            "gsd,phase-{},plan-{},wave-{}",
+            phase_number, pt.plan_number, pt.wave
+        );
 
         let task_id = tasks::create(
             &db,
@@ -158,13 +182,11 @@ pub fn gsd_create_tasks_from_plans(
     }
 
     // Set up dependencies: tasks in wave N depend on all tasks from wave N-1
-    let mut wave_task_ids: std::collections::BTreeMap<i64, Vec<i64>> = std::collections::BTreeMap::new();
+    let mut wave_task_ids: std::collections::BTreeMap<i64, Vec<i64>> =
+        std::collections::BTreeMap::new();
     for pt in &plan_tasks {
         if let Some(ids) = plan_to_task_ids.get(&pt.plan_number) {
-            wave_task_ids
-                .entry(pt.wave)
-                .or_default()
-                .extend(ids.iter());
+            wave_task_ids.entry(pt.wave).or_default().extend(ids.iter());
         }
     }
 
@@ -177,8 +199,15 @@ pub fn gsd_create_tasks_from_plans(
 
         for &curr_id in &curr_ids {
             for &prev_id in &prev_ids {
-                if let Err(e) = dependencies::add_dependency(&db, curr_id, prev_id, Some("on_success")) {
-                    log::warn!("GSD: Failed to add dependency {} → {}: {}", prev_id, curr_id, e);
+                if let Err(e) =
+                    dependencies::add_dependency(&db, curr_id, prev_id, Some("on_success"))
+                {
+                    log::warn!(
+                        "GSD: Failed to add dependency {} → {}: {}",
+                        prev_id,
+                        curr_id,
+                        e
+                    );
                 }
             }
         }

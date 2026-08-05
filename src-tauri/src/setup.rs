@@ -17,7 +17,8 @@ fn silent_cmd(program: &str, args: &[&str]) -> Option<String> {
         .stderr(std::process::Stdio::piped());
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.output().ok()
+    cmd.output()
+        .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
@@ -57,7 +58,10 @@ pub fn check_system(port: Option<u16>) -> serde_json::Value {
 
     // Port availability
     let port_ok = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-        .map(|l| { drop(l); true })
+        .map(|l| {
+            drop(l);
+            true
+        })
         .unwrap_or(false);
 
     // GitHub CLI (optional)
@@ -89,7 +93,10 @@ pub fn check_directory(path: String) -> serde_json::Value {
     // Try to create and remove a temp file
     let writable = if p.exists() {
         let test = p.join(".claude_board_write_test");
-        std::fs::write(&test, "test").is_ok() && { std::fs::remove_file(&test).ok(); true }
+        std::fs::write(&test, "test").is_ok() && {
+            std::fs::remove_file(&test).ok();
+            true
+        }
     } else {
         // Try creating the directory
         std::fs::create_dir_all(p).is_ok()
@@ -134,12 +141,29 @@ pub async fn finish(
         // Create first project if provided
         if let (Some(name), Some(dir)) = (project_name, project_dir) {
             if !name.trim().is_empty() && !dir.trim().is_empty() {
-                let slug = name.trim().to_lowercase()
-                    .chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                let slug = name
+                    .trim()
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
                     .collect::<String>()
-                    .trim().replace(' ', "-");
-                let slug = if slug.is_empty() { "project".to_string() } else { slug };
-                db::projects::create(&pool, name.trim(), &slug, dir.trim(), None, None, None, None);
+                    .trim()
+                    .replace(' ', "-");
+                let slug = if slug.is_empty() {
+                    "project".to_string()
+                } else {
+                    slug
+                };
+                db::projects::create(
+                    &pool,
+                    name.trim(),
+                    &slug,
+                    dir.trim(),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 log::info!("First project created: {}", name.trim());
             }
         }
@@ -152,16 +176,13 @@ pub async fn finish(
         services::http_api::start_server(mcp_port).await;
     });
 
-    let win_builder = tauri::WebviewWindowBuilder::new(
-        &app,
-        "main",
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("Claude Board")
-    .inner_size(1400.0, 900.0)
-    .min_inner_size(800.0, 600.0)
-    .center()
-    .disable_drag_drop_handler();
+    let win_builder =
+        tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("Claude Board")
+            .inner_size(1400.0, 900.0)
+            .min_inner_size(800.0, 600.0)
+            .center()
+            .disable_drag_drop_handler();
 
     // Matches the window built in lib.rs, so the title bar looks the same whether
     // the app opens through first-run setup or straight into the board.
