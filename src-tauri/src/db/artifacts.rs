@@ -155,6 +155,27 @@ pub fn get(db: &DbPool, id: i64) -> Option<StoredArtifact> {
     .ok()
 }
 
+/// Every stored filename the index claims, across all projects.
+///
+/// Orphan detection has to look past a single project: a file belonging to another
+/// project's artifact is accounted for, not an orphan.
+pub fn all_stored_names(db: &DbPool) -> std::collections::HashSet<String> {
+    let conn = db.lock();
+    let mut stmt = match conn.prepare("SELECT stored_name FROM artifacts") {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("all_stored_names: {}", e);
+            return Default::default();
+        }
+    };
+    let mut out = std::collections::HashSet::new();
+    match stmt.query_map([], |r| r.get::<_, String>(0)) {
+        Ok(rows) => out.extend(rows.filter_map(|r| r.ok())),
+        Err(e) => log::error!("all_stored_names: {}", e),
+    }
+    out
+}
+
 pub fn delete(db: &DbPool, id: i64) -> Result<(), AppError> {
     let conn = db.lock();
     conn.execute("DELETE FROM artifacts WHERE id=?1", params![id])?;

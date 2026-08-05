@@ -501,6 +501,7 @@ pub fn run() {
             commands::artifacts::add_artifact_ref,
             commands::artifacts::remove_artifact_ref,
             commands::artifacts::task_artifacts,
+            commands::artifacts::repair_artifacts,
             commands::artifacts::reveal_artifact,
         ])
         .on_menu_event(|app, event| {

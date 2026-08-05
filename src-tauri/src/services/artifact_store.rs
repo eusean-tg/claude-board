@@ -178,27 +178,57 @@ pub fn meta_for(title: &str, kind: &str, content: &str) -> DerivedMeta {
     }
 }
 
-/// Bring the index back in line with what is on disk.
+/// What a repair pass changed.
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct RepairReport {
+    /// Rows whose stored document was missing, and were removed.
+    pub dropped_rows: usize,
+    /// Rows whose preview or size no longer matched the file on disk.
+    pub refreshed: usize,
+    /// Files in the store that no artifact row points at.
+    pub orphan_files: Vec<String>,
+}
+
+/// Reconcile the index with the store.
 ///
-/// Explicit saves write the file and the row together, so drift only happens when
-/// a stored document is edited by hand outside the app. This is the repair path
-/// for that, not a step in the task lifecycle.
-pub fn refresh_from_disk(db: &DbPool, project_id: i64, data_dir: &str) -> usize {
-    let mut refreshed = 0;
+/// Explicit saves write the row and the file together, so drift only happens when
+/// a stored document is edited or deleted outside the app. This is the recovery
+/// path for that, not a step in the task lifecycle.
+///
+/// A row whose document is gone is dropped: it renders in the tab as a document
+/// that cannot be opened, which is worse than its absence. An orphan file is only
+/// reported — deleting a file the app cannot account for is not a decision to make
+/// on the user's behalf.
+///
+/// Title and kind are never re-derived. They are the classification the agent or
+/// the user gave, and reading them back out of prose is exactly what this design
+/// removed.
+pub fn repair(db: &DbPool, project_id: i64, data_dir: &str) -> RepairReport {
+    let mut report = RepairReport::default();
+    let mut known = std::collections::HashSet::new();
 
     for artifact in db::artifacts::list_for_project(db, project_id) {
+        known.insert(artifact.stored_name.clone());
+
         let Ok(on_disk) = read(data_dir, &artifact.stored_name) else {
-            // A missing file is the repair pass's problem, not this one's.
+            if let Err(e) = db::artifacts::delete(db, artifact.id) {
+                log::error!("artifact repair: dropping {} failed: {}", artifact.id, e);
+                continue;
+            }
+            log::warn!(
+                "artifact repair: dropped {} — {} is missing from the store",
+                artifact.id,
+                artifact.stored_name
+            );
+            report.dropped_rows += 1;
             continue;
         };
-        // The title and kind are the user's or the agent's, never re-derived; only
-        // what actually follows from the bytes is refreshed.
+
         let (_, preview) = crate::services::artifacts::title_and_preview(&on_disk);
         let size = on_disk.len() as i64;
         if artifact.preview == preview && artifact.size == size {
             continue;
         }
-
         if let Err(e) = db::artifacts::update_meta(
             db,
             artifact.id,
@@ -210,23 +240,38 @@ pub fn refresh_from_disk(db: &DbPool, project_id: i64, data_dir: &str) -> usize 
             None,
         ) {
             log::error!(
-                "artifact refresh: updating {} failed: {}",
+                "artifact repair: refreshing {} failed: {}",
                 artifact.stored_name,
                 e
             );
             continue;
         }
-        refreshed += 1;
+        report.refreshed += 1;
     }
 
-    if refreshed > 0 {
+    // Orphans are reported per project, so a file belonging to another project's
+    // artifact is not mistaken for one. Only names no row anywhere claims count.
+    if let Ok(entries) = std::fs::read_dir(root(data_dir)) {
+        let claimed = db::artifacts::all_stored_names(db);
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".md") && !claimed.contains(&name) {
+                report.orphan_files.push(name);
+            }
+        }
+        report.orphan_files.sort();
+    }
+
+    if report != RepairReport::default() {
         log::info!(
-            "Refreshed {} artifact(s) from disk for project {}",
-            refreshed,
-            project_id
+            "Artifact repair for project {}: {} dropped, {} refreshed, {} orphan file(s)",
+            project_id,
+            report.dropped_rows,
+            report.refreshed,
+            report.orphan_files.len()
         );
     }
-    refreshed
+    report
 }
 
 // ─── Explicit saves ─────────────────────────────────────────────────────────
@@ -739,6 +784,119 @@ mod tests {
     fn revising_a_missing_artifact_is_an_error() {
         let e = save_env("missing");
         assert!(revise(&e.db, &e.data_dir, 9999, None, None, Some("x"), None, None).is_err());
+    }
+
+    #[test]
+    fn repair_drops_a_row_whose_document_is_missing() {
+        let e = save_env("repair-missing");
+        let saved = save(
+            &e.db,
+            &e.data_dir,
+            e.project_id,
+            "Gone",
+            "doc",
+            "x\n",
+            &[],
+            None,
+        )
+        .unwrap();
+        remove(&e.data_dir, &saved.stored_name).unwrap();
+
+        let report = repair(&e.db, e.project_id, &e.data_dir);
+
+        // A row with no document renders as something that cannot be opened,
+        // which is worse than its absence.
+        assert_eq!(report.dropped_rows, 1);
+        assert!(db::artifacts::get(&e.db, saved.id).is_none());
+    }
+
+    #[test]
+    fn repair_refreshes_a_document_edited_on_disk() {
+        let e = save_env("repair-edited");
+        let saved = save(
+            &e.db,
+            &e.data_dir,
+            e.project_id,
+            "Plan",
+            "plan",
+            "original\n",
+            &["context".to_string()],
+            None,
+        )
+        .unwrap();
+
+        write(
+            &e.data_dir,
+            &saved.stored_name,
+            "edited by hand, longer now\n",
+        )
+        .unwrap();
+        let report = repair(&e.db, e.project_id, &e.data_dir);
+
+        assert_eq!(report.refreshed, 1);
+        let row = db::artifacts::get(&e.db, saved.id).unwrap();
+        assert!(row.preview.contains("edited by hand"));
+        assert_eq!(row.size, "edited by hand, longer now\n".len() as i64);
+        // The classification is the user's, never re-read out of the prose.
+        assert_eq!(row.title.as_deref(), Some("Plan"));
+        assert_eq!(row.kind, "plan");
+        assert_eq!(row.tags.as_deref(), Some(r#"["context"]"#));
+    }
+
+    #[test]
+    fn repair_reports_an_orphan_file_without_deleting_it() {
+        let e = save_env("repair-orphan");
+        write(&e.data_dir, "stray-1.md", "not indexed\n").unwrap();
+
+        let report = repair(&e.db, e.project_id, &e.data_dir);
+
+        assert_eq!(report.orphan_files, vec!["stray-1.md".to_string()]);
+        // Deleting a file the app cannot account for is not its decision to make.
+        assert!(read(&e.data_dir, "stray-1.md").is_ok());
+    }
+
+    #[test]
+    fn repair_does_not_call_another_projects_document_an_orphan() {
+        let e = save_env("repair-cross-project");
+        let other = {
+            let conn = e.db.lock();
+            conn.execute(
+                "INSERT INTO projects (name,slug,working_dir) VALUES ('O','o','/other')",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let theirs = save(&e.db, &e.data_dir, other, "Theirs", "doc", "x\n", &[], None).unwrap();
+
+        let report = repair(&e.db, e.project_id, &e.data_dir);
+
+        assert!(
+            !report.orphan_files.contains(&theirs.stored_name),
+            "another project's document is accounted for: {:?}",
+            report.orphan_files
+        );
+    }
+
+    #[test]
+    fn repair_is_a_no_op_on_a_healthy_store() {
+        let e = save_env("repair-healthy");
+        save(
+            &e.db,
+            &e.data_dir,
+            e.project_id,
+            "Plan",
+            "plan",
+            "x\n",
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            repair(&e.db, e.project_id, &e.data_dir),
+            RepairReport::default()
+        );
     }
 
     #[test]

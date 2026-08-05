@@ -95,6 +95,13 @@ pub fn task_artifacts(task_id: i64) -> Result<Vec<StoredArtifact>, String> {
     Ok(db::artifact_refs::artifacts_for_task(&db, task_id))
 }
 
+/// Reconcile the index with the store, and report what changed.
+#[tauri::command]
+pub fn repair_artifacts(project_id: i64) -> Result<artifact_store::RepairReport, String> {
+    let db = db::get_db();
+    Ok(artifact_store::repair(&db, project_id, &data_dir()))
+}
+
 /// The absolute store path of an artifact, for referencing it from a task.
 ///
 /// A path rather than the content: the agent reads the document itself, the

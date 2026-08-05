@@ -391,6 +391,7 @@ export const api = {
         addArtifactRef: (taskId, artifactId, role) => tauriCall('add_artifact_ref', { taskId, artifactId, role }),
         removeArtifactRef: (taskId, artifactId) => tauriCall('remove_artifact_ref', { taskId, artifactId }),
         taskArtifacts: (taskId) => tauriCall('task_artifacts', { taskId }),
+        repairArtifacts: (projectId) => tauriCall('repair_artifacts', { projectId }),
         revealArtifact: (id) => tauriCall('reveal_artifact', { id }),
       }
     : {}),
