@@ -20,6 +20,7 @@ pub struct Project {
     pub auto_pr: Option<i64>,
     pub auto_push: Option<i64>,
     pub auto_merge: Option<i64>,
+    pub shared_artifact_tag: Option<String>,
     pub pr_base_branch: Option<String>,
     pub project_key: Option<String>,
     pub task_counter: Option<i64>,
@@ -75,6 +76,7 @@ fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         auto_pr: row.get("auto_pr")?,
         auto_push: row.get("auto_push").ok().flatten(),
         auto_merge: row.get("auto_merge").ok().flatten(),
+        shared_artifact_tag: row.get("shared_artifact_tag").ok().flatten(),
         pr_base_branch: row.get("pr_base_branch")?,
         project_key: row.get("project_key")?,
         task_counter: row.get("task_counter")?,
@@ -222,6 +224,18 @@ pub fn update_git_settings(
         "UPDATE projects SET auto_branch=?1,auto_pr=?2,auto_push=?3,auto_merge=?4,pr_base_branch=?5,updated_at=datetime('now','localtime') WHERE id=?6",
         params![auto_branch as i64, auto_pr as i64, auto_push as i64, auto_merge as i64, pr_base_branch, id],
     ) { log::error!("update_git_settings: {}", e); }
+}
+
+/// Set the tag whose artifacts every task in the project is told about.
+///
+/// An empty string turns sharing off, which is the default: a tag rather than a
+/// boolean so a one-off plan does not land in every unrelated prompt.
+pub fn update_shared_artifact_tag(db: &DbPool, id: i64, tag: &str) {
+    let conn = db.lock();
+    if let Err(e) = conn.execute(
+        "UPDATE projects SET shared_artifact_tag=?1,updated_at=datetime('now','localtime') WHERE id=?2",
+        params![tag.trim(), id],
+    ) { log::error!("update_shared_artifact_tag: {}", e); }
 }
 
 pub fn update_test_settings(db: &DbPool, id: i64, auto_test: bool, test_prompt: &str) {

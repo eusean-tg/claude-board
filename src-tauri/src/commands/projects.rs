@@ -38,6 +38,7 @@ pub fn create_project(
     auto_pr: Option<bool>,
     auto_push: Option<bool>,
     auto_merge: Option<bool>,
+    shared_artifact_tag: Option<String>,
     pr_base_branch: Option<String>,
     auto_test: Option<bool>,
     test_prompt: Option<String>,
@@ -104,6 +105,9 @@ pub fn create_project(
             auto_merge.unwrap_or(false),
             pr_base_branch.as_deref().unwrap_or("main"),
         );
+    }
+    if let Some(ref tag) = shared_artifact_tag {
+        pq::update_shared_artifact_tag(&db, id, tag);
     }
     if auto_test.is_some() || test_prompt.is_some() {
         pq::update_test_settings(
@@ -182,6 +186,7 @@ pub fn update_project(
     auto_pr: Option<bool>,
     auto_push: Option<bool>,
     auto_merge: Option<bool>,
+    shared_artifact_tag: Option<String>,
     pr_base_branch: Option<String>,
     auto_test: Option<bool>,
     test_prompt: Option<String>,
@@ -257,6 +262,9 @@ pub fn update_project(
                 .as_deref()
                 .unwrap_or(project.pr_base_branch.as_deref().unwrap_or("main")),
         );
+    }
+    if let Some(ref tag) = shared_artifact_tag {
+        pq::update_shared_artifact_tag(&db, id, tag);
     }
     if github_repo.is_some() || github_sync_enabled.is_some() {
         pq::update_github_settings(

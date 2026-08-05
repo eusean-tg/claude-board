@@ -82,6 +82,7 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
   const [autoPr, setAutoPr] = useState(project?.auto_pr ? true : false);
   const [autoPush, setAutoPush] = useState(project?.auto_push ? true : false);
   const [autoMerge, setAutoMerge] = useState(project?.auto_merge ? true : false);
+  const [sharedArtifactTag, setSharedArtifactTag] = useState(project?.shared_artifact_tag || '');
   const [prBaseBranch, setPrBaseBranch] = useState(project?.pr_base_branch || 'main');
   const [autoTest, setAutoTest] = useState(project?.auto_test ? true : false);
   const [testPrompt, setTestPrompt] = useState(project?.test_prompt || '');
@@ -201,6 +202,7 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
         autoPr: !!autoPr,
         autoPush: !!autoPush,
         autoMerge: !!autoMerge,
+        sharedArtifactTag: sharedArtifactTag.trim(),
         prBaseBranch: prBaseBranch.trim() || 'main',
         autoTest: !!autoTest,
         testPrompt: testPrompt.trim(),
@@ -578,6 +580,17 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
                         )}
                       </Field>
                     )}
+
+                    {/* A tag rather than a switch: sharing every document would put
+                        one-off plans into unrelated prompts. Empty shares none. */}
+                    <Field label={t('projectModal.sharedArtifactTag')} hint={t('projectModal.sharedArtifactTagHint')}>
+                      <input
+                        value={sharedArtifactTag}
+                        onChange={(e) => setSharedArtifactTag(e.target.value)}
+                        placeholder={t('projectModal.sharedArtifactTagPlaceholder')}
+                        className="input-field"
+                      />
+                    </Field>
                   </Section>
 
                   {/* Auto Test */}

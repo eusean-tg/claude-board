@@ -18,6 +18,7 @@ pub fn create_tables(conn: &Connection) {
             auto_test_model TEXT DEFAULT '', circuit_breaker_threshold INTEGER DEFAULT 0,
             circuit_breaker_active INTEGER DEFAULT 0, consecutive_failures INTEGER DEFAULT 0,
             require_approval INTEGER DEFAULT 0, gsd_enabled INTEGER DEFAULT 0,
+            shared_artifact_tag TEXT DEFAULT '',
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME DEFAULT (datetime('now','localtime'))
         );
@@ -646,6 +647,14 @@ pub fn run_migrations(conn: &Connection) {
             "projects",
             "pr_provider",
             "ALTER TABLE projects ADD COLUMN pr_provider TEXT DEFAULT 'auto'",
+        ),
+        // Artifacts carrying this tag are named in every task's prompt for the
+        // project. Empty means no sharing — a tag rather than a boolean so a
+        // one-off plan does not land in every unrelated prompt.
+        (
+            "projects",
+            "shared_artifact_tag",
+            "ALTER TABLE projects ADD COLUMN shared_artifact_tag TEXT DEFAULT ''",
         ),
         // Merge a completed task's branch into the base branch. Off by default:
         // it moves the base branch and briefly switches the checkout, which is

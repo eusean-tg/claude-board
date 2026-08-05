@@ -222,6 +222,10 @@ export default {
   'projectModal.autoMerge': 'Auto Merge',
   'projectModal.autoMergeDesc': "Merge the task's branch into the base branch when it completes",
   'projectModal.autoMergePrConflict': 'Unavailable while Auto PR is on — the pull request lands the branch',
+  'projectModal.sharedArtifactTag': 'Shared Document Tag',
+  'projectModal.sharedArtifactTagPlaceholder': 'context',
+  'projectModal.sharedArtifactTagHint':
+    "Documents carrying this tag are named in every task's prompt for this project, so agents can read them without being pointed at them. Leave empty to share none.",
   'projectModal.autoPush': 'Auto Push',
   'projectModal.autoPushDesc': 'Push branches to remote automatically',
   'projectModal.autoPR': 'Auto PR',

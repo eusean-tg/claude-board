@@ -1664,8 +1664,19 @@ pub fn start(
     // updates the live copy rather than a repository copy that nothing syncs.
     let referenced_artifacts = {
         let data_dir = db::get_data_dir().to_string_lossy().to_string();
+        // Explicit references first, then anything carrying the project's shared
+        // tag. Deduplicated by id, so a document that is both referenced and
+        // shared is named once.
+        let mut seen = std::collections::HashSet::new();
+        let shared_tag = project.shared_artifact_tag.clone().unwrap_or_default();
         db::artifact_refs::artifacts_for_task(&db, task.id)
             .into_iter()
+            .chain(db::artifacts::list_by_tag(
+                &db,
+                task.project_id,
+                &shared_tag,
+            ))
+            .filter(|a| seen.insert(a.id))
             .filter_map(|a| {
                 let path =
                     crate::services::artifact_store::resolve(&data_dir, &a.stored_name).ok()?;
@@ -2363,6 +2374,7 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     auto_pr: None,
                                     auto_push: None,
                                     auto_merge: None,
+                                    shared_artifact_tag: None,
                                     pr_base_branch: None,
                                     project_key: None,
                                     task_counter: None,

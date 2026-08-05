@@ -147,6 +147,36 @@ pub fn list_for_project(db: &DbPool, project_id: i64) -> Vec<StoredArtifact> {
     out
 }
 
+/// Artifacts in a project carrying `tag`, most recently updated first.
+///
+/// Matching happens in SQL against the JSON array text, which is exact enough for
+/// the shape `tasks.tags` already uses — `"context"` with the quotes, so `ctx` does
+/// not match `context` and vice versa.
+pub fn list_by_tag(db: &DbPool, project_id: i64, tag: &str) -> Vec<StoredArtifact> {
+    if tag.trim().is_empty() {
+        return vec![];
+    }
+    let needle = format!("%\"{}\"%", tag.trim());
+    let conn = db.lock();
+    let mut stmt = match conn.prepare(
+        "SELECT * FROM artifacts
+          WHERE project_id = ?1 AND tags LIKE ?2
+          ORDER BY updated_at DESC, id DESC",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("list_by_tag: {}", e);
+            return vec![];
+        }
+    };
+    let mut out = Vec::new();
+    match stmt.query_map(params![project_id, needle], row_to_artifact) {
+        Ok(rows) => out.extend(rows.filter_map(|r| r.ok())),
+        Err(e) => log::error!("list_by_tag: {}", e),
+    }
+    out
+}
+
 pub fn get(db: &DbPool, id: i64) -> Option<StoredArtifact> {
     let conn = db.lock();
     conn.query_row("SELECT * FROM artifacts WHERE id=?1", params![id], |r| {
@@ -350,6 +380,75 @@ mod index_tests {
         assert_eq!(row.title.as_deref(), Some("Renamed"));
         assert_eq!(row.kind, "spec");
         assert_eq!(row.tags.as_deref(), Some(r#"["shared"]"#));
+    }
+
+    #[test]
+    fn list_by_tag_matches_whole_tags_only() {
+        let db = test_db();
+        let p = seed_project(&db, "board");
+        let shared = create(
+            &db,
+            p,
+            "a-1.md",
+            &meta("Shared", "", "doc", 1),
+            r#"["context","plan"]"#,
+            None,
+        )
+        .unwrap();
+        create(
+            &db,
+            p,
+            "b-1.md",
+            &meta("Other", "", "doc", 1),
+            r#"["contextual"]"#,
+            None,
+        )
+        .unwrap();
+        create(&db, p, "c-1.md", &meta("None", "", "doc", 1), "[]", None).unwrap();
+
+        let found = list_by_tag(&db, p, "context");
+
+        // "contextual" must not match "context": the quotes in the stored JSON are
+        // what make the comparison exact.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, shared);
+    }
+
+    #[test]
+    fn list_by_tag_is_empty_for_no_tag() {
+        let db = test_db();
+        let p = seed_project(&db, "board");
+        create(
+            &db,
+            p,
+            "a-1.md",
+            &meta("A", "", "doc", 1),
+            r#"["context"]"#,
+            None,
+        )
+        .unwrap();
+
+        // An unset setting must share nothing, not everything.
+        assert!(list_by_tag(&db, p, "").is_empty());
+        assert!(list_by_tag(&db, p, "   ").is_empty());
+    }
+
+    #[test]
+    fn list_by_tag_does_not_cross_projects() {
+        let db = test_db();
+        let mine = seed_project(&db, "mine");
+        let theirs = seed_project(&db, "theirs");
+        create(
+            &db,
+            theirs,
+            "t-1.md",
+            &meta("Theirs", "", "doc", 1),
+            r#"["context"]"#,
+            None,
+        )
+        .unwrap();
+
+        assert!(list_by_tag(&db, mine, "context").is_empty());
     }
 
     #[test]
