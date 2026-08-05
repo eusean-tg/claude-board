@@ -105,7 +105,9 @@ export default function ListView({
   };
 
   const columns = [
-    { key: 'id', label: '#', w: 'w-12' },
+    // Task keys are `FTR-CB-1042` — a 3-char type prefix, the project key, and a
+    // 4-or-more digit counter. w-12 left ~24px after padding, so every key wrapped.
+    { key: 'id', label: '#', w: 'w-24' },
     { key: 'title', label: t('list.title'), w: 'flex-1 min-w-[150px]' },
     { key: 'task_type', label: t('list.type'), w: 'w-20' },
     { key: 'status', label: t('list.status'), w: 'w-24' },
@@ -197,7 +199,12 @@ export default function ListView({
                       <Square size={14} className="text-surface-600 group-hover:text-surface-400" />
                     )}
                   </td>
-                  <td className="px-3 py-2 text-surface-600 font-mono text-[11px]">{task.task_key || `#${task.id}`}</td>
+                  {/* nowrap rather than a wider fixed column: the table uses auto
+                      layout, so an unbreakable cell sizes the column to whatever
+                      the longest key needs — a longer project key still fits. */}
+                  <td className="px-3 py-2 text-surface-600 font-mono text-[11px] whitespace-nowrap">
+                    {task.task_key || `#${task.id}`}
+                  </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       {task.is_running && task.status === 'testing' && (
