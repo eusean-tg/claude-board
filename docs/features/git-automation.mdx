@@ -36,13 +36,38 @@ When a task moves to **Testing**, Claude Board can automatically create a pull r
 
 <Note>Auto PR requires the `gh` CLI to be installed and authenticated on the machine running Claude Board.</Note>
 
+## Auto Merge
+
+When a task completes, Claude Board can merge its branch into the base branch with `--no-ff`, so each task's work stays identifiable as a unit in the history.
+
+The merge runs in the project's own checkout. It refuses rather than forces:
+
+- **Uncommitted changes** stop it before anything is touched, so a merge can neither fail halfway nor absorb edits that were never meant to land.
+- **A conflict** is rolled back, leaving the base branch as it was and the work still on the task branch.
+- **The branch you had checked out** is restored afterwards.
+
+Every outcome is written to the task's own log, so you can see whether the work landed without reading the app log file.
+
+<Note>Auto Merge is unavailable while Auto PR is on, since the pull request is what lands the branch in that setup.</Note>
+
+## When a task completes
+
+The task's worktree is always removed. What happens to the branch depends on whether its commits exist anywhere else:
+
+- **Reachable from the base branch** — merged by Auto Merge, or merged by you — the branch is deleted.
+- **Not reachable from anywhere** — the branch is kept, and the task log says so. Deleting it would destroy the only copy of the work, so Claude Board never does.
+
+This means that with Auto Merge and Auto PR both off, task branches accumulate. That is deliberate: nothing else has the commits.
+
 ## Configuration
 
 Configure git automation in your project settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Auto Branch | Off | Create branches automatically |
+| Auto Branch | On | Create a branch and worktree per task |
+| Auto Merge | Off | Merge the task's branch into the base branch on completion |
+| Auto Push | Off | Push branches to the remote automatically |
 | Auto PR | Off | Create PRs when task enters Testing |
 | Base Branch | `main` | The branch to create feature branches from |
 

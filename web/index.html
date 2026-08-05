@@ -313,22 +313,6 @@
         transform: translateY(-1px);
         box-shadow: 0 4px 20px rgba(218, 119, 86, 0.4);
       }
-      .lang-btn {
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-size: 11px;
-        font-weight: 700;
-        background: rgba(42, 37, 32, 0.5);
-        color: #918678;
-        border: 1px solid rgba(61, 55, 46, 0.3);
-        cursor: pointer;
-        transition: all 0.2s;
-        letter-spacing: 0.5px;
-      }
-      .lang-btn:hover {
-        color: #ebe4d8;
-        border-color: rgba(218, 119, 86, 0.3);
-      }
 
       /* ─── Hero ─── */
       .hero {
@@ -1711,10 +1695,6 @@
           justify-content: center;
           border-radius: 10px;
         }
-        .nav-links .lang-btn {
-          margin: 4px 24px 8px;
-          align-self: flex-start;
-        }
 
         /* Hero */
         .hero {
@@ -2357,7 +2337,6 @@
           <a href="#features" data-i18n="nav.features">Features</a>
           <a href="#preview" data-i18n="nav.preview">Preview</a>
           <a href="https://docs.claboard.dev" target="_blank" data-i18n="nav.docs">Docs</a>
-          <button onclick="toggleLang()" class="lang-btn" id="langBtn" title="Türkçe">TR</button>
           <a href="#download" class="nav-cta">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -5519,95 +5498,29 @@
 
     <script>
       // ─── i18n System ───
-      var currentLang = localStorage.getItem('lang') || 'en';
-      var i18n = {
-        tr: {
-          'nav.orchestration': 'Orkestrasyon',
-          'nav.how': 'Nasıl çalışır',
-          'nav.features': 'Özellikler',
-          'nav.preview': 'Önizleme',
-          'nav.docs': 'Dokümantasyon',
-          'nav.download': 'İndir',
-          'hero.title': 'AI geliştirici<br><span class="accent">ekibini yönet.</span>',
-          'hero.subtitle':
-            'Birden fazla Claude ajanını bağımlılık grafikleri, dalga yürütme ve canlı gözlemlenebilirlik ile çalıştırın. Özellikleri paralel olarak geliştirin \u2014 tek bir komut merkezinden.',
-          'hero.downloadBtn': 'Uygulamayı İndir',
-          'hero.viewSource': 'Kaynak Kodu',
-          'orch.label': 'Orkestrasyon Motoru',
-          'orch.title': 'Üç görünüm. Tam kontrol.',
-          'orch.desc': "Tüm AI pipeline'ınızı orkestrasyon komut merkezinden izleyin, hata ayıklayın ve yönetin.",
-          'orch.graphTitle': 'Bağımlılık Grafı',
-          'orch.graphDesc':
-            'Sürüklenebilir düğümler, koşullu kenarlar ve dalga gruplama ile interaktif DAG. Bağımlılık oluşturmak için Shift+sürükle.',
-          'orch.timelineTitle': 'Yürütme Zaman Çizelgesi',
-          'orch.timelineDesc':
-            'Gerçek zamanlı ilerleme, ŞİMDİ işaretçisi, dalga grupları ve maliyet dökümü ile Gantt tarzı görünüm.',
-          'orch.liveTitle': 'Canlı Gözlemlenebilirlik',
-          'orch.liveDesc':
-            'Tüm araç çağrılarının gerçek zamanlı beslemesi, çatışma tespitli dosya ısı haritası ve ajan bazlı etkinlik kartları.',
-          'how.label': 'Nasıl çalışır',
-          'how.title': 'Fikirden üretime.<br>Üç adımda.',
-          'how.step1Title': 'Görevlerinizi tanımlayın',
-          'how.step1Desc':
-            'Özellikler, hatalar veya yeniden düzenlemeler tanımlayın. Modelleri seçin, öncelikleri belirleyin ve sürükle-bırak ile görevler arası bağımlılıkları oluşturun.',
-          'how.step2Title': 'Ajanlar orkestre eder',
-          'how.step2Desc':
-            'Görevler bağımlılık duyarlı dalgalar halinde yürütülür. Her ajan bir dal oluşturur, kod yazar, test çalıştırır ve commit eder \u2014 tümü canlı terminalde görünür.',
-          'how.step3Title': 'İnceleyin ve gönderin',
-          'how.step3Desc':
-            "Diff'leri, otomatik test sonuçlarını ve token maliyetlerini inceleyin. Otomatik PR oluşturmak için onaylayın veya değişiklik isteyin \u2014 Claude geri bildiriminize göre yineler.",
-          'feat.label': 'Özellikler',
-          'feat.title': 'AI geliştirici ekibi<br>çalıştırmak için gereken her şey.',
-          'feat.desc': 'Orkestrasyondan dağıtıma, Claude Board tüm yaşam döngüsünü yönetir.',
-          'preview.label': 'Önizleme',
-          'preview.title': 'Çalışırken görün.',
-          'preview.desc': "Claude Board'un farklı görünümlerini keşfetmek için tıklayın.",
-          'dl.label': 'İndir',
-          'dl.title': "Claude Board'u Edinin.",
-          'dl.desc':
-            'Ücretsiz ve açık kaynak. <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank">Claude Code CLI</a> gerektirir.',
-          'cta.title': 'AI ekibinizi orkestre etmeye hazır mısınız?',
-          'cta.desc': 'Bağımlılık grafikleri. Dalga yürütme. Canlı gözlemlenebilirlik. Hepsi makinenizde çalışır.',
-          'cta.github': "GitHub'da Yıldızla",
-          'cta.docs': 'Dokümantasyonu Oku',
-        },
-      };
+      // ─── Localization ───
+      // English lives in the DOM; a translation is an override dict keyed by the
+      // data-i18n / data-i18n-html attributes still present on the markup. No
+      // language ships beyond English, so nothing overrides anything today.
+      var currentLang = 'en';
+      var i18n = {};
 
       function applyLang(lang) {
+        if (!i18n[lang]) return;
         currentLang = lang;
         localStorage.setItem('lang', lang);
         document.documentElement.lang = lang;
-        var btn = document.getElementById('langBtn');
-        if (lang === 'tr') {
-          btn.textContent = 'EN';
-          btn.title = 'English';
-        } else {
-          btn.textContent = 'TR';
-          btn.title = 'Türkçe';
-        }
         document.querySelectorAll('[data-i18n]').forEach(function (el) {
           var key = el.getAttribute('data-i18n');
-          if (lang === 'en') {
-            if (el._i18nOriginal) el.textContent = el._i18nOriginal;
-          } else {
-            if (!el._i18nOriginal) el._i18nOriginal = el.textContent;
-            if (i18n[lang] && i18n[lang][key]) el.textContent = i18n[lang][key];
-          }
+          if (!el._i18nOriginal) el._i18nOriginal = el.textContent;
+          el.textContent = i18n[lang][key] || el._i18nOriginal;
         });
         document.querySelectorAll('[data-i18n-html]').forEach(function (el) {
           var key = el.getAttribute('data-i18n-html');
-          if (lang === 'en') {
-            if (el._i18nOriginalHtml) el.innerHTML = el._i18nOriginalHtml;
-          } else {
-            if (!el._i18nOriginalHtml) el._i18nOriginalHtml = el.innerHTML;
-            if (i18n[lang] && i18n[lang][key]) el.innerHTML = i18n[lang][key];
-          }
+          if (!el._i18nOriginalHtml) el._i18nOriginalHtml = el.innerHTML;
+          el.innerHTML = i18n[lang][key] || el._i18nOriginalHtml;
         });
       }
-      function toggleLang() {
-        applyLang(currentLang === 'en' ? 'tr' : 'en');
-      }
-      if (currentLang !== 'en') applyLang(currentLang);
 
       // ─── Ambient Particles ───
       (function () {

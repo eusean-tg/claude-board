@@ -42,12 +42,21 @@
               {
                 "group": "Getting Started",
                 "icon": "rocket",
-                "pages": ["introduction", "installation", "quickstart"]
+                "pages": [
+                  "introduction",
+                  "installation",
+                  "quickstart"
+                ]
               },
               {
                 "group": "Core Concepts",
                 "icon": "lightbulb",
-                "pages": ["concepts/board", "concepts/tasks", "concepts/agents", "concepts/review"]
+                "pages": [
+                  "concepts/board",
+                  "concepts/tasks",
+                  "concepts/agents",
+                  "concepts/review"
+                ]
               },
               {
                 "group": "Orchestration",
@@ -178,152 +187,9 @@
               {
                 "group": "Real-time",
                 "icon": "bolt",
-                "pages": ["api/events"]
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "language": "tr",
-        "tabs": [
-          {
-            "tab": "Dokümantasyon",
-            "groups": [
-              {
-                "group": "Başlangıç",
-                "icon": "rocket",
-                "pages": ["tr/introduction", "tr/installation", "tr/quickstart"]
-              },
-              {
-                "group": "Temel Kavramlar",
-                "icon": "lightbulb",
-                "pages": ["tr/concepts/board", "tr/concepts/tasks", "tr/concepts/agents", "tr/concepts/review"]
-              },
-              {
-                "group": "Orkestrasyon",
-                "icon": "sitemap",
                 "pages": [
-                  "tr/features/orchestration",
-                  "tr/features/dependencies",
-                  "tr/features/queue",
-                  "tr/features/planning-mode",
-                  "tr/features/roadmap",
-                  "tr/features/retry-backoff",
-                  "tr/features/failed-status",
-                  "tr/features/task-timeout"
+                  "api/events"
                 ]
-              },
-              {
-                "group": "Çalıştırma ve Test",
-                "icon": "play",
-                "pages": [
-                  "tr/features/terminal",
-                  "tr/features/project-terminal",
-                  "tr/features/split-terminal",
-                  "tr/features/session-replay",
-                  "tr/features/auto-test",
-                  "tr/features/diff-viewer"
-                ]
-              },
-              {
-                "group": "Git ve Dağıtım",
-                "icon": "code-branch",
-                "pages": [
-                  "tr/features/git-automation",
-                  "tr/features/auto-pr",
-                  "tr/features/github-issues",
-                  "tr/features/webhooks"
-                ]
-              },
-              {
-                "group": "AI Yapılandırma",
-                "icon": "wand-magic-sparkles",
-                "pages": [
-                  "tr/features/roles",
-                  "tr/features/custom-commands",
-                  "tr/features/skill-import",
-                  "tr/features/scan",
-                  "tr/features/claude-manager"
-                ]
-              },
-              {
-                "group": "İçerik ve Şablonlar",
-                "icon": "file-lines",
-                "pages": [
-                  "tr/features/templates",
-                  "tr/features/prompt-templates",
-                  "tr/features/snippets",
-                  "tr/features/attachments",
-                  "tr/features/artifacts"
-                ]
-              },
-              {
-                "group": "Analitik ve Arayüz",
-                "icon": "chart-bar",
-                "pages": [
-                  "tr/features/analytics",
-                  "tr/features/token-counter",
-                  "tr/features/task-keys",
-                  "tr/features/model-filter",
-                  "tr/features/status-animations",
-                  "tr/features/voice-assistant"
-                ]
-              },
-              {
-                "group": "Yapılandırma",
-                "icon": "gear",
-                "pages": [
-                  "tr/configuration/projects",
-                  "tr/configuration/permissions",
-                  "tr/configuration/claude-md",
-                  "tr/configuration/environment"
-                ]
-              },
-              {
-                "group": "Masaüstü Uygulaması",
-                "icon": "desktop",
-                "pages": [
-                  "tr/desktop/setup",
-                  "tr/desktop/builds",
-                  "tr/features/settings",
-                  "tr/features/notifications"
-                ]
-              }
-            ]
-          },
-          {
-            "tab": "API Referansı",
-            "groups": [
-              {
-                "group": "Endpointler",
-                "icon": "code",
-                "pages": [
-                  "tr/api/projects",
-                  "tr/api/tasks",
-                  "tr/api/planning",
-                  "tr/api/stats",
-                  "tr/api/webhooks",
-                  "tr/api/snippets",
-                  "tr/api/templates",
-                  "tr/api/roles",
-                  "tr/api/attachments",
-                  "tr/api/settings",
-                  "tr/api/auth"
-                ]
-              },
-              {
-                "group": "Entegrasyonlar",
-                "icon": "plug",
-                "pages": [
-                  "tr/api/github",
-                  "tr/api/claude-manager"
-                ]
-              },
-              {
-                "group": "Gerçek Zamanlı",
-                "icon": "bolt",
-                "pages": ["tr/api/events"]
               }
             ]
           }

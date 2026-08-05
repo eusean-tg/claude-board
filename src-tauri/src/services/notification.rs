@@ -22,43 +22,26 @@ struct Strings {
     body_unknown_error: &'static str,
 }
 
-fn strings(lang: &str) -> Strings {
-    match lang {
-        "tr" => Strings {
-            task_started: "G\u{00f6}rev Ba\u{015f}lad\u{0131}",
-            task_completed: "G\u{00f6}rev Tamamland\u{0131}",
-            task_failed: "G\u{00f6}rev Ba\u{015f}ar\u{0131}s\u{0131}z",
-            test_passed: "Test Ge\u{00e7}ti",
-            test_failed: "Test Ba\u{015f}ar\u{0131}s\u{0131}z",
-            revision_requested: "Revizyon \u{0130}stendi",
-            queue_started: "Kuyruktan Ba\u{015f}lat\u{0131}ld\u{0131}",
-            body_started: "Claude \u{00e7}al\u{0131}\u{015f}maya ba\u{015f}lad\u{0131}",
-            body_completed: "Tamamland\u{0131} \u{2014} inceleme bekliyor",
-            body_failed: "Ba\u{015f}ar\u{0131}s\u{0131}z",
-            body_test_passed: "Otomatik test ge\u{00e7}ti \u{2014} onayland\u{0131}",
-            body_test_failed:
-                "Otomatik test ba\u{015f}ar\u{0131}s\u{0131}z \u{2014} revizyon gerekli",
-            body_revision: "Claude\u{2019}a revizyon g\u{00f6}nderildi",
-            body_queue: "Kuyruktan otomatik ba\u{015f}lat\u{0131}ld\u{0131}",
-            body_unknown_error: "bilinmeyen hata",
-        },
-        _ => Strings {
-            task_started: "Task Started",
-            task_completed: "Task Completed",
-            task_failed: "Task Failed",
-            test_passed: "Test Passed",
-            test_failed: "Test Failed",
-            revision_requested: "Revision Requested",
-            queue_started: "Queue Started",
-            body_started: "Claude started working",
-            body_completed: "Completed \u{2014} ready for review",
-            body_failed: "Failed",
-            body_test_passed: "Auto-test passed \u{2014} approved",
-            body_test_failed: "Auto-test failed \u{2014} revision needed",
-            body_revision: "Revision feedback sent to Claude",
-            body_queue: "Auto-started from queue",
-            body_unknown_error: "unknown error",
-        },
+/// English is the only bundled locale. When a second one is added, match on
+/// `lang` here and fall through to these strings for unrecognised codes; the
+/// language still arrives from app settings at every call site.
+fn strings(_lang: &str) -> Strings {
+    Strings {
+        task_started: "Task Started",
+        task_completed: "Task Completed",
+        task_failed: "Task Failed",
+        test_passed: "Test Passed",
+        test_failed: "Test Failed",
+        revision_requested: "Revision Requested",
+        queue_started: "Queue Started",
+        body_started: "Claude started working",
+        body_completed: "Completed \u{2014} ready for review",
+        body_failed: "Failed",
+        body_test_passed: "Auto-test passed \u{2014} approved",
+        body_test_failed: "Auto-test failed \u{2014} revision needed",
+        body_revision: "Revision feedback sent to Claude",
+        body_queue: "Auto-started from queue",
+        body_unknown_error: "unknown error",
     }
 }
 

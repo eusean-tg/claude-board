@@ -1,19 +1,21 @@
 import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { api } from '../lib/api';
 import en from './locales/en';
-import tr from './locales/tr';
 
 /**
+ * English is the only shipped locale. The machinery below is language-agnostic
+ * and stays that way — every user-facing string goes through `t()` so a second
+ * language is a matter of adding a file, not of rewriting components.
+ *
  * To add a new language:
  * 1. Create client/src/i18n/locales/{code}.js (copy en.js as template)
  * 2. Add import and entry to `locales` and `LANGUAGES` below
  * 3. That's it — the language selector will pick it up automatically
  */
-const locales = { en, tr };
+const locales = { en };
 
 const LANGUAGES = [
   { code: 'en', label: 'English', flag: '🇬🇧' },
-  { code: 'tr', label: 'Türkçe', flag: '🇹🇷' },
   // { code: 'de', label: 'Deutsch', flag: '🇩🇪' },
   // { code: 'fr', label: 'Français', flag: '🇫🇷' },
   // { code: 'es', label: 'Español', flag: '🇪🇸' },
