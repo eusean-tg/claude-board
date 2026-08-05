@@ -528,6 +528,10 @@ export default {
   'artifacts.delete': 'Delete',
   'artifacts.deleteConfirm': 'Delete this artifact from the store? Your project file is not affected.',
   'artifacts.deleteFailed': 'Failed to delete the artifact',
+  'artifacts.conflictTitle': 'A newer version exists in the repository',
+  'artifacts.conflictDesc':
+    'This copy has edits of its own, so it was left as it is. The repository version is still in your repo.',
+  'artifacts.conflictDismiss': 'Got it',
   'artifacts.selectPrompt': 'Select a file to preview it.',
   'artifacts.preview': 'Preview',
   'artifacts.edit': 'Edit',

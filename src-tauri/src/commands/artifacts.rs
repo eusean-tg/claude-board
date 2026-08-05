@@ -72,6 +72,18 @@ pub fn delete_artifact(id: i64) -> Result<(), String> {
     delete_artifact_in(&db, &data_dir(), id)
 }
 
+/// Acknowledge that the repository has a newer version of this document.
+///
+/// Only clears the flag. The stored copy is untouched, which is the point: the
+/// edits it holds exist nowhere else, while the repository version is still in
+/// the repository under version control.
+#[tauri::command]
+pub fn dismiss_artifact_conflict(id: i64) -> Result<StoredArtifact, String> {
+    let db = db::get_db();
+    db::artifacts::clear_conflict(&db, id).map_err(|e| e.to_string())?;
+    db::artifacts::get(&db, id).ok_or_else(|| "Artifact not found".to_string())
+}
+
 /// The absolute store path of an artifact, for referencing it from a task.
 ///
 /// A path rather than the content: the agent reads the document itself, the
@@ -219,9 +231,19 @@ mod tests {
     fn seed(e: &Env, rel: &str, content: &str) -> i64 {
         let meta = artifact_store::derive_meta(rel, content);
         let name = artifact_store::unique_stored_name(&e.data_dir, rel, 1_000);
-        let id =
-            db::artifacts::insert_or_replace(&e.db, e.project_id, rel, &name, &meta, e.task_id)
-                .unwrap();
+        // The hash capture would have recorded, so these fixtures start
+        // un-diverged.
+        let hash = artifact_store::content_hash(content);
+        let id = db::artifacts::insert_or_replace(
+            &e.db,
+            e.project_id,
+            rel,
+            &name,
+            &meta,
+            e.task_id,
+            &hash,
+        )
+        .unwrap();
         artifact_store::write(&e.data_dir, &name, content).unwrap();
         id
     }

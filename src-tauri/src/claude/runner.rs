@@ -443,6 +443,11 @@ pub fn capture_task_artifacts(db: &DbPool, task_id: i64, project_id: i64, workin
         &worktree,
         &data_dir,
     );
+    // An agent given a referenced artifact's store path writes to it directly,
+    // which is not a capture — the path sits outside the working directory. The
+    // file changes while the index keeps the old title, preview and size, so the
+    // index is reconciled with disk after every completion.
+    crate::services::artifact_store::refresh_from_disk(db, project_id, &data_dir);
 }
 
 fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {

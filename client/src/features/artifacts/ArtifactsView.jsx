@@ -1,5 +1,17 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { FileText, RefreshCw, Search, Pencil, Eye, FolderOpen, Copy, Save, Check, Trash2 } from 'lucide-react';
+import {
+  FileText,
+  RefreshCw,
+  Search,
+  Pencil,
+  Eye,
+  FolderOpen,
+  Copy,
+  Save,
+  Check,
+  Trash2,
+  AlertTriangle,
+} from 'lucide-react';
 import MDEditor from '@uiw/react-md-editor';
 import { api, notifyError } from '../../lib/api';
 import { IS_TAURI } from '../../lib/tauriEvents';
@@ -144,6 +156,18 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
       setCopied(true);
       clearTimeout(copiedTimer.current);
       copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      notifyError(err?.message || tRef.current('artifacts.loadFailed'));
+    }
+  }, [selectedId]);
+
+  const handleDismissConflict = useCallback(async () => {
+    if (!selectedId) return;
+    try {
+      const updated = await api.dismissArtifactConflict(selectedId);
+      if (updated) {
+        setArtifacts((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+      }
     } catch (err) {
       notifyError(err?.message || tRef.current('artifacts.loadFailed'));
     }
@@ -362,6 +386,22 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                   </button>
                 </div>
               </div>
+
+              {selected.conflict_at && (
+                <div className="flex items-start gap-2 px-4 py-2 border-b border-amber-500/20 bg-amber-500/10 flex-shrink-0">
+                  <AlertTriangle size={12} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <div className="text-[10px] text-amber-300">{t('artifacts.conflictTitle')}</div>
+                    <div className="text-[10px] text-surface-400">{t('artifacts.conflictDesc')}</div>
+                  </div>
+                  <button
+                    onClick={handleDismissConflict}
+                    className="ml-auto flex-shrink-0 px-2 py-0.5 rounded bg-surface-800 hover:bg-surface-700 text-[10px] text-surface-300 hover:text-surface-100 transition-colors"
+                  >
+                    {t('artifacts.conflictDismiss')}
+                  </button>
+                </div>
+              )}
 
               {authoringTaskIds.length > 0 && (
                 <div className="flex items-center gap-1.5 flex-wrap px-4 py-1.5 border-b border-surface-800 flex-shrink-0">

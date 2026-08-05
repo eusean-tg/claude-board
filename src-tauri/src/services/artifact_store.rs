@@ -30,6 +30,18 @@ pub fn root(data_dir: &str) -> PathBuf {
     data.parent().unwrap_or(data).join("artifacts")
 }
 
+/// SHA-256 of a document's content, hex encoded.
+///
+/// Persisted on the artifact row, so it has to be stable across builds — which
+/// rules out `DefaultHasher`, whose output is explicitly not guaranteed to be
+/// consistent between Rust versions.
+pub fn content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 /// Seconds since the Unix epoch, for stamping a new artifact's filename.
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -274,19 +286,42 @@ pub fn flush_captures(
             continue;
         };
 
-        let meta = derive_meta(&rel, &content);
+        let existing = db::artifacts::find_by_source(db, project_id, &rel);
 
         // A document that is already indexed keeps its filename, so a path
         // already handed to an agent stays valid across re-captures.
-        let name = db::artifacts::find_by_source(db, project_id, &rel)
-            .map(|a| a.stored_name)
+        let name = existing
+            .as_ref()
+            .map(|a| a.stored_name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| unique_stored_name(data_dir, &rel, now_unix()));
+
+        // Refuse to overwrite a copy edited since it was last synced from the
+        // repository. Without this a later task touching the same document
+        // silently discards in-app edits, and the stored copy is the only place
+        // those edits exist.
+        if let Some(artifact) = existing.as_ref() {
+            if let (Some(captured), Ok(on_disk)) =
+                (artifact.captured_hash.as_deref(), read(data_dir, &name))
+            {
+                if content_hash(&on_disk) != captured {
+                    log::warn!(
+                        "artifact capture: {} diverged from the last sync; keeping the stored copy",
+                        rel
+                    );
+                    db::artifacts::set_conflict(db, artifact.id).ok();
+                    continue;
+                }
+            }
+        }
+
+        let meta = derive_meta(&rel, &content);
+        let hash = content_hash(&content);
 
         // Index first: a row whose file is missing is repairable, while a file
         // with no row is invisible.
         if let Err(e) =
-            db::artifacts::insert_or_replace(db, project_id, &rel, &name, &meta, task_id)
+            db::artifacts::insert_or_replace(db, project_id, &rel, &name, &meta, task_id, &hash)
         {
             log::error!("artifact capture: indexing {} failed: {}", rel, e);
             continue;
@@ -307,6 +342,69 @@ pub fn flush_captures(
 /// Drop any pending captures for a task without storing them.
 pub fn discard_captures(task_id: i64) {
     PENDING.lock().remove(&task_id);
+}
+
+/// Bring the index back in line with what is actually on disk.
+///
+/// An agent handed an artifact's store path can write to it directly. That write
+/// is not a capture — the path is outside the working directory, so
+/// `source_rel_path` rejects it — which means the file changes while the index
+/// keeps the old title, preview, kind and size, and the Artifacts tab describes a
+/// document that no longer exists in that form.
+///
+/// Also flags divergence, so a stored copy that no longer matches its last
+/// repository sync is left alone by capture.
+///
+/// `captured_hash` is deliberately not written here. Only capture writes it, so
+/// an edit made through the store — by hand or by an agent — keeps its protection
+/// instead of being blessed as the new baseline.
+pub fn refresh_from_disk(db: &DbPool, project_id: i64, data_dir: &str) -> usize {
+    let mut refreshed = 0;
+
+    for artifact in db::artifacts::list_for_project(db, project_id) {
+        let Ok(on_disk) = read(data_dir, &artifact.stored_name) else {
+            // A missing file is the repair pass's problem, not this one's.
+            continue;
+        };
+
+        let matches_capture =
+            artifact.captured_hash.as_deref() == Some(content_hash(&on_disk).as_str());
+        let meta = derive_meta(&artifact.source_rel_path, &on_disk);
+        let metadata_is_current = artifact.title == meta.title
+            && artifact.preview == meta.preview
+            && artifact.kind == meta.kind
+            && artifact.size == meta.size;
+
+        // The common case: the file matches both its metadata and the last sync.
+        if metadata_is_current && (matches_capture || artifact.conflict_at.is_some()) {
+            continue;
+        }
+
+        if !metadata_is_current {
+            if let Err(e) = db::artifacts::update_content_meta(db, artifact.id, &meta) {
+                log::error!(
+                    "artifact refresh: updating {} failed: {}",
+                    artifact.stored_name,
+                    e
+                );
+                continue;
+            }
+            refreshed += 1;
+        }
+
+        if !matches_capture && artifact.conflict_at.is_none() {
+            db::artifacts::set_conflict(db, artifact.id).ok();
+        }
+    }
+
+    if refreshed > 0 {
+        log::info!(
+            "Refreshed {} artifact(s) from disk for project {}",
+            refreshed,
+            project_id
+        );
+    }
+    refreshed
 }
 
 #[cfg(test)]
@@ -520,6 +618,183 @@ mod capture_tests {
                 &self.data_dir,
             )
         }
+    }
+
+    #[test]
+    fn content_hash_is_deterministic_and_content_sensitive() {
+        assert_eq!(content_hash("a"), content_hash("a"));
+        assert_ne!(content_hash("a"), content_hash("b"));
+        // A fixed vector, so a future change to the algorithm is visible rather
+        // than silently invalidating every stored hash.
+        assert_eq!(
+            content_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn a_later_task_refreshes_an_untouched_copy() {
+        let e = env("resync", 20);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# One\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+
+        std::fs::write(&file, "# Two\n\nmore\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        assert_eq!(e.flush(), 1, "nobody edited the copy, so it re-syncs");
+
+        let row = &db::artifacts::list_for_project(&e.db, e.project_id)[0];
+        assert_eq!(row.title.as_deref(), Some("Two"));
+        assert!(row.conflict_at.is_none());
+        assert!(read(&e.data_dir, &row.stored_name)
+            .unwrap()
+            .contains("more"));
+    }
+
+    #[test]
+    fn a_later_task_does_not_clobber_an_edited_copy() {
+        let e = env("no-clobber", 21);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# From the agent\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+        let name = db::artifacts::list_for_project(&e.db, e.project_id)[0]
+            .stored_name
+            .clone();
+
+        // The user edits the artifact in the app.
+        write(&e.data_dir, &name, "# Edited by the user\n\nmy notes\n").unwrap();
+
+        // A later task rewrites the repository copy and completes.
+        std::fs::write(&file, "# From a later agent\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        assert_eq!(e.flush(), 0, "the diverged copy is left alone");
+
+        // The edit is the only copy of those notes; losing it silently is the
+        // failure this check exists to prevent.
+        let stored = read(&e.data_dir, &name).unwrap();
+        assert!(stored.contains("my notes"), "got {:?}", stored);
+        let row = &db::artifacts::list_for_project(&e.db, e.project_id)[0];
+        assert!(row.conflict_at.is_some(), "the divergence must be visible");
+    }
+
+    #[test]
+    fn a_resync_clears_a_previous_conflict_flag() {
+        let e = env("clear-conflict", 22);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# One\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+        let row = db::artifacts::list_for_project(&e.db, e.project_id)[0].clone();
+        db::artifacts::set_conflict(&e.db, row.id).unwrap();
+
+        // The stored copy still matches the last sync, so this capture succeeds
+        // and the stale flag goes with it.
+        std::fs::write(&file, "# Two\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+
+        assert!(db::artifacts::get(&e.db, row.id)
+            .unwrap()
+            .conflict_at
+            .is_none());
+    }
+
+    #[test]
+    fn refresh_picks_up_an_agent_writing_through_the_store_path() {
+        let e = env("refresh-store-write", 23);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# Original\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+        let row = db::artifacts::list_for_project(&e.db, e.project_id)[0].clone();
+
+        // An agent given the store path writes to it directly. That is not a
+        // capture — the path is outside the working directory — so without a
+        // refresh the index keeps describing the old content.
+        write(
+            &e.data_dir,
+            &row.stored_name,
+            "# Rewritten by an agent\n\nnew body\n",
+        )
+        .unwrap();
+
+        assert_eq!(refresh_from_disk(&e.db, e.project_id, &e.data_dir), 1);
+
+        let after = db::artifacts::get(&e.db, row.id).unwrap();
+        assert_eq!(after.title.as_deref(), Some("Rewritten by an agent"));
+        assert!(after.preview.contains("new body"));
+        assert_eq!(
+            after.size,
+            "# Rewritten by an agent\n\nnew body\n".len() as i64
+        );
+        assert!(after.conflict_at.is_some(), "diverged from the last sync");
+    }
+
+    #[test]
+    fn refresh_is_a_no_op_when_nothing_changed() {
+        let e = env("refresh-noop", 24);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# Original\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+
+        assert_eq!(refresh_from_disk(&e.db, e.project_id, &e.data_dir), 0);
+        let row = &db::artifacts::list_for_project(&e.db, e.project_id)[0];
+        assert!(row.conflict_at.is_none());
+    }
+
+    #[test]
+    fn refresh_ignores_an_artifact_whose_file_is_missing() {
+        let e = env("refresh-missing", 25);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# Original\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+        let row = db::artifacts::list_for_project(&e.db, e.project_id)[0].clone();
+        remove(&e.data_dir, &row.stored_name).unwrap();
+
+        // The repair pass owns missing files; refresh must not panic or flag.
+        assert_eq!(refresh_from_disk(&e.db, e.project_id, &e.data_dir), 0);
+        assert!(db::artifacts::get(&e.db, row.id)
+            .unwrap()
+            .conflict_at
+            .is_none());
+    }
+
+    #[test]
+    fn an_artifact_from_before_hashing_is_not_treated_as_diverged() {
+        let e = env("null-hash", 26);
+        let file = e.worktree.join("docs/plan.md");
+        std::fs::write(&file, "# One\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        e.flush();
+        let row = db::artifacts::list_for_project(&e.db, e.project_id)[0].clone();
+
+        // Rows that predate captured_hash have NULL, which must read as "never
+        // synced" rather than "diverged" — otherwise every artifact in an existing
+        // install would flag on the next capture and never update again.
+        {
+            let conn = e.db.lock();
+            conn.execute(
+                "UPDATE artifacts SET captured_hash=NULL WHERE id=?1",
+                rusqlite::params![row.id],
+            )
+            .unwrap();
+        }
+
+        std::fs::write(&file, "# Two\n").unwrap();
+        note_markdown_write(e.task_id, file.to_str().unwrap());
+        assert_eq!(e.flush(), 1, "capture takes ownership of an unhashed row");
+
+        let after = db::artifacts::get(&e.db, row.id).unwrap();
+        assert_eq!(after.title.as_deref(), Some("Two"));
+        assert!(
+            after.captured_hash.is_some(),
+            "and records a hash from now on"
+        );
+        assert!(after.conflict_at.is_none());
     }
 
     #[test]

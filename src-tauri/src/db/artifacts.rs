@@ -23,6 +23,12 @@ pub struct StoredArtifact {
     pub size: i64,
     pub origin_task_id: Option<i64>,
     pub last_task_id: Option<i64>,
+    /// SHA-256 of the content as last synced from the repository. Only capture
+    /// writes it; when the stored file stops matching, the copy is user-owned.
+    pub captured_hash: Option<String>,
+    /// Set when capture found a newer repository version and declined to
+    /// overwrite a diverged copy.
+    pub conflict_at: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -51,6 +57,8 @@ fn row_to_artifact(row: &Row) -> rusqlite::Result<StoredArtifact> {
         size: row.get::<_, Option<i64>>("size")?.unwrap_or(0),
         origin_task_id: row.get("origin_task_id").ok().flatten(),
         last_task_id: row.get("last_task_id").ok().flatten(),
+        captured_hash: row.get("captured_hash").ok().flatten(),
+        conflict_at: row.get("conflict_at").ok().flatten(),
         created_at: row.get("created_at").ok().flatten(),
         updated_at: row.get("updated_at").ok().flatten(),
     })
@@ -67,19 +75,23 @@ pub fn insert_or_replace(
     stored_name: &str,
     meta: &DerivedMeta,
     task_id: i64,
+    captured_hash: &str,
 ) -> Result<i64, AppError> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO artifacts
             (project_id, stored_name, source_rel_path, title, preview, kind, size,
-             origin_task_id, last_task_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             origin_task_id, last_task_id, captured_hash, conflict_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, NULL)
          ON CONFLICT(project_id, source_rel_path) DO UPDATE SET
             title = excluded.title,
             preview = excluded.preview,
             kind = excluded.kind,
             size = excluded.size,
             last_task_id = excluded.last_task_id,
+            captured_hash = excluded.captured_hash,
+            -- A successful sync from the repo resolves any previous divergence.
+            conflict_at = NULL,
             updated_at = datetime('now','localtime')",
         params![
             project_id,
@@ -89,7 +101,8 @@ pub fn insert_or_replace(
             meta.preview,
             meta.kind,
             meta.size,
-            task_id
+            task_id,
+            captured_hash
         ],
     )?;
     // `last_insert_rowid` reports 0 when the statement took the DO UPDATE path,
@@ -153,7 +166,12 @@ pub fn find_by_source(
     .ok()
 }
 
-/// Refresh the metadata derived from a document's content, after an in-app edit.
+/// Refresh the metadata derived from a document's content.
+///
+/// Deliberately leaves `captured_hash` alone. That is what makes an in-app edit —
+/// or an agent writing through the store path — diverge from the last repository
+/// sync, so a later capture keeps its hands off rather than silently discarding
+/// the edit.
 pub fn update_content_meta(db: &DbPool, id: i64, meta: &DerivedMeta) -> Result<(), AppError> {
     let conn = db.lock();
     conn.execute(
@@ -162,6 +180,26 @@ pub fn update_content_meta(db: &DbPool, id: i64, meta: &DerivedMeta) -> Result<(
                 updated_at=datetime('now','localtime')
           WHERE id=?5",
         params![meta.title, meta.preview, meta.kind, meta.size, id],
+    )?;
+    Ok(())
+}
+
+/// Flag that the repository has a newer version that capture declined to write.
+pub fn set_conflict(db: &DbPool, id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE artifacts SET conflict_at=datetime('now','localtime') WHERE id=?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Acknowledge a divergence. The stored copy is unchanged; only the flag clears.
+pub fn clear_conflict(db: &DbPool, id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE artifacts SET conflict_at=NULL WHERE id=?1",
+        params![id],
     )?;
     Ok(())
 }
@@ -231,6 +269,7 @@ mod index_tests {
             "1-plan.md",
             &derived("Plan", "a preview", "plan", 120),
             first_author,
+            "seed-hash",
         )
         .unwrap();
         let second = insert_or_replace(
@@ -240,6 +279,7 @@ mod index_tests {
             "1-plan.md",
             &derived("Plan v2", "changed", "plan", 300),
             second_author,
+            "seed-hash",
         )
         .unwrap();
 
@@ -265,6 +305,7 @@ mod index_tests {
             "1-a.md",
             &derived("A", "", "doc", 1),
             t,
+            "seed-hash",
         )
         .unwrap();
         insert_or_replace(
@@ -274,6 +315,7 @@ mod index_tests {
             "2-b.md",
             &derived("B", "", "doc", 1),
             t,
+            "seed-hash",
         )
         .unwrap();
 
@@ -296,6 +338,7 @@ mod index_tests {
             "1-readme.md",
             &DerivedMeta::default(),
             ta,
+            "seed-hash",
         )
         .unwrap();
         let two = insert_or_replace(
@@ -305,6 +348,7 @@ mod index_tests {
             "2-readme.md",
             &DerivedMeta::default(),
             tb,
+            "seed-hash",
         )
         .unwrap();
 
@@ -325,6 +369,7 @@ mod index_tests {
             "1-x.md",
             &derived("X", "", "doc", 1),
             task,
+            "seed-hash",
         )
         .unwrap();
 
@@ -344,7 +389,16 @@ mod index_tests {
         let db = test_db();
         let p = seed_project(&db, "board");
         let t = seed_task(&db, p, "writer");
-        insert_or_replace(&db, p, "docs/x.md", "1-x.md", &DerivedMeta::default(), t).unwrap();
+        insert_or_replace(
+            &db,
+            p,
+            "docs/x.md",
+            "1-x.md",
+            &DerivedMeta::default(),
+            t,
+            "h",
+        )
+        .unwrap();
 
         {
             let conn = db.lock();
@@ -367,6 +421,7 @@ mod index_tests {
             "1-p.md",
             &derived("Old", "old", "doc", 10),
             t,
+            "seed-hash",
         )
         .unwrap();
 
@@ -384,8 +439,16 @@ mod index_tests {
         let db = test_db();
         let p = seed_project(&db, "board");
         let t = seed_task(&db, p, "writer");
-        let id =
-            insert_or_replace(&db, p, "docs/d.md", "1-d.md", &DerivedMeta::default(), t).unwrap();
+        let id = insert_or_replace(
+            &db,
+            p,
+            "docs/d.md",
+            "1-d.md",
+            &DerivedMeta::default(),
+            t,
+            "h",
+        )
+        .unwrap();
 
         delete(&db, id).unwrap();
 

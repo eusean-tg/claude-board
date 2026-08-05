@@ -498,6 +498,7 @@ pub fn run() {
             commands::artifacts::update_artifact,
             commands::artifacts::delete_artifact,
             commands::artifacts::artifact_reference,
+            commands::artifacts::dismiss_artifact_conflict,
             commands::artifacts::reveal_artifact,
         ])
         .on_menu_event(|app, event| {

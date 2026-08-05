@@ -7,6 +7,7 @@ const updateArtifact = vi.fn();
 const deleteArtifact = vi.fn();
 const artifactReference = vi.fn();
 const revealArtifact = vi.fn();
+const dismissArtifactConflict = vi.fn();
 const getTask = vi.fn();
 const notifyError = vi.fn();
 
@@ -18,6 +19,7 @@ vi.mock('../../../lib/api', () => ({
     deleteArtifact,
     artifactReference,
     revealArtifact,
+    dismissArtifactConflict,
     getTask,
   },
   notifyError,
@@ -250,6 +252,37 @@ describe('ArtifactsView render states', () => {
     // Still selected, so the title appears in both the row and the pane header.
     expect(screen.getAllByText('The Plan').length).toBeGreaterThan(0);
     confirm.mockRestore();
+  });
+
+  it('warns when the repository has a newer version, and dismisses on request', async () => {
+    const conflicted = { ...ARTIFACTS[0], conflict_at: '2026-08-06T00:00:00Z' };
+    listArtifacts.mockResolvedValue([conflicted]);
+    getArtifact.mockResolvedValue({ content: 'my edits' });
+    dismissArtifactConflict.mockResolvedValue({ ...conflicted, conflict_at: null });
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+
+    // The user's edits are the only copy, so the divergence has to be visible
+    // rather than silently resolved either way.
+    await waitFor(() => expect(screen.getByText('artifacts.conflictTitle')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('artifacts.conflictDismiss'));
+    await waitFor(() => expect(dismissArtifactConflict).toHaveBeenCalledWith(11));
+    await waitFor(() => expect(screen.queryByText('artifacts.conflictTitle')).toBeNull());
+  });
+
+  it('shows no warning for an artifact in sync with the repository', async () => {
+    listArtifacts.mockResolvedValue(ARTIFACTS);
+    getArtifact.mockResolvedValue({ content: 'x' });
+
+    render(<ArtifactsView projectId={1} project={{ name: 'repo' }} tasks={[]} />);
+    await waitFor(() => expect(screen.getByText('The Plan')).toBeTruthy());
+    fireEvent.click(screen.getByText('The Plan'));
+    await waitFor(() => expect(screen.getByText('artifacts.edit')).toBeTruthy());
+
+    expect(screen.queryByText('artifacts.conflictTitle')).toBeNull();
   });
 
   it('shows one attribution chip per authoring task', async () => {

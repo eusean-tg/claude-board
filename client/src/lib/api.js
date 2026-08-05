@@ -388,6 +388,7 @@ export const api = {
         updateArtifact: (id, content) => tauriCall('update_artifact', { id, content }),
         deleteArtifact: (id) => tauriCall('delete_artifact', { id }),
         artifactReference: (id) => tauriCall('artifact_reference', { id }),
+        dismissArtifactConflict: (id) => tauriCall('dismiss_artifact_conflict', { id }),
         revealArtifact: (id) => tauriCall('reveal_artifact', { id }),
       }
     : {}),

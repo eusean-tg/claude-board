@@ -207,6 +207,14 @@ pub fn create_tables(conn: &Connection) {
             size INTEGER DEFAULT 0,
             origin_task_id INTEGER,
             last_task_id INTEGER,
+            -- SHA-256 of the content as last synced *from the repository*. Only
+            -- capture writes it. When the stored file stops matching this, the
+            -- copy has been edited in the app or by an agent through its store
+            -- path, and capture must not overwrite it.
+            captured_hash TEXT,
+            -- Set when capture found a newer repository version but declined to
+            -- overwrite a diverged copy.
+            conflict_at DATETIME,
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -622,6 +630,20 @@ pub fn run_migrations(conn: &Connection) {
             "projects",
             "pr_provider",
             "ALTER TABLE projects ADD COLUMN pr_provider TEXT DEFAULT 'auto'",
+        ),
+        // Divergence tracking for the artifact store. Added after the table, so
+        // existing installs need the columns backfilled as NULL — a NULL
+        // captured_hash reads as "never synced from the repo", which lets the
+        // first capture take ownership rather than immediately flagging.
+        (
+            "artifacts",
+            "captured_hash",
+            "ALTER TABLE artifacts ADD COLUMN captured_hash TEXT",
+        ),
+        (
+            "artifacts",
+            "conflict_at",
+            "ALTER TABLE artifacts ADD COLUMN conflict_at DATETIME",
         ),
         // Merge a completed task's branch into the base branch. Off by default:
         // it moves the base branch and briefly switches the checkout, which is
