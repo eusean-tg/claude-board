@@ -140,6 +140,18 @@ export default {
   'blocker.answerPlaceholder': 'Type your answer',
   'blocker.waiting': 'Waiting for your answer',
 
+  // ─── Discussion ───
+  'discussion.title': 'Discussion',
+  'discussion.empty': 'Talk through the approach here. Nothing you write changes the work.',
+  'discussion.placeholder': 'Reconsider the approach, add a constraint, change direction...',
+  'discussion.post': 'Add to discussion',
+  'discussion.posting': 'Adding...',
+  'discussion.resume': 'Send Claude back in',
+  'discussion.resuming': 'Starting...',
+  'discussion.resumeHint': 'Restart the task with this discussion as context, keeping the work so far',
+  'discussion.you': 'You',
+  'discussion.agent': 'Claude',
+
   // ─── Task Card ───
   'card.startWorking': 'Start Working',
   'card.sendToTesting': 'Send to Testing',

@@ -388,6 +388,9 @@ export const api = {
         answerBlocker: (blockerId, responses) =>
           tauriCall('answer_blocker', { blockerId, responses, mcpPort: MCP_PORT }),
         cancelBlocker: (blockerId) => tauriCall('cancel_blocker', { blockerId }),
+        getDiscussion: (taskId) => tauriCall('get_discussion', { taskId }),
+        postDiscussionMessage: (taskId, body) => tauriCall('post_discussion_message', { taskId, body }),
+        resumeWithDiscussion: (taskId) => tauriCall('resume_with_discussion', { taskId, mcpPort: MCP_PORT }),
         // ─── Artifacts ───
         listArtifacts: (projectId) => tauriCall('list_artifacts', { projectId }),
         getArtifact: (id) => tauriCall('get_artifact', { id }),

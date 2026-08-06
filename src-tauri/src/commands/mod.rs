@@ -5,6 +5,7 @@ pub mod auth;
 pub mod blockers;
 pub mod chat;
 pub mod claude_manager;
+pub mod discussion;
 pub mod git_utils;
 pub mod github;
 pub mod gsd;

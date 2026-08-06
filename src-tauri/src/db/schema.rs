@@ -287,6 +287,20 @@ pub fn create_tables(conn: &Connection) {
             FOREIGN KEY (blocker_id) REFERENCES task_blockers(id) ON DELETE CASCADE,
             FOREIGN KEY (option_id) REFERENCES task_blocker_options(id) ON DELETE CASCADE
         );
+
+        -- Talking about a task's direction without touching its work.
+        --
+        -- Separate from task_revisions, which records a rejection and feeds
+        -- max_auto_revisions. A discussion changes the approach and leaves those
+        -- counters alone.
+        CREATE TABLE IF NOT EXISTS task_discussion_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user','agent')),
+            body TEXT NOT NULL,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -314,6 +328,8 @@ pub fn create_tables(conn: &Connection) {
             ON task_blocker_options(blocker_id, sort_order)",
         "CREATE INDEX IF NOT EXISTS idx_task_blocker_responses_blocker
             ON task_blocker_responses(blocker_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_discussion_task
+            ON task_discussion_messages(task_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_project ON prompt_templates(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_webhooks_project ON webhooks(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_roles_project ON roles(project_id)",

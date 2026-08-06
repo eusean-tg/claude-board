@@ -6,6 +6,7 @@ pub mod auth;
 pub mod blockers;
 pub mod custom_models;
 pub mod dependencies;
+pub mod discussion;
 pub mod model_catalog;
 pub mod projects;
 pub mod roadmap;

@@ -275,21 +275,50 @@ pub(crate) fn resolve_resume_dir(task_id: i64, working_dir: &str) -> String {
     existing_task_worktree(task_id, working_dir).unwrap_or_else(|| working_dir.to_string())
 }
 
-/// The prompt a resumed agent gets: its answer, then the task as first given.
+/// Why a task is being picked up again.
+#[derive(Clone, Copy, Debug)]
+pub enum Resume<'a> {
+    /// The answer to the question the agent stopped to ask.
+    Answer(&'a str),
+    /// A conversation about the approach, from "chat about this". Redirects the
+    /// work rather than answering a question, and never counts as a revision.
+    Discussion(&'a str),
+}
+
+impl Resume<'_> {
+    fn text(&self) -> &str {
+        match self {
+            Self::Answer(t) | Self::Discussion(t) => t,
+        }
+    }
+}
+
+/// The prompt a resumed agent gets: what changed, then the task as first given.
 ///
-/// The answer goes first and the original follows, because a resumed session may
+/// What changed goes first and the original follows, because a resumed session may
 /// have lost the thread and a fresh one never had it — either way the agent needs
-/// to know what it asked about before it re-reads the task.
-pub(crate) fn build_resume_prompt(answer: &str, original: &str) -> String {
+/// the new information before it re-reads the task.
+pub(crate) fn build_resume_prompt(resume: Resume, original: &str) -> String {
+    let lead = match resume {
+        Resume::Answer(answer) => format!(
+            "You asked a question and stopped. The user has answered:\n\n{}\n\n\
+             Continue the task using that answer.",
+            answer.trim()
+        ),
+        Resume::Discussion(thread) => format!(
+            "You and the user have been discussing how to approach this task:\n\n{}\n\n\
+             Continue the task along the lines you agreed. Where the discussion \
+             changes what you decided earlier, follow the discussion.",
+            thread.trim()
+        ),
+    };
     format!(
-        "You asked a question and stopped. The user has answered:\n\n\
-         {}\n\n\
-         Continue the task using that answer. Your earlier work is still in this \
-         working directory — do not start over, and do not revert anything.\n\n\
+        "{}\n\n\
+         Your earlier work is still in this working directory — do not start over, \
+         and do not revert anything.\n\n\
          ---\n\n\
          {}",
-        answer.trim(),
-        original
+        lead, original
     )
 }
 
@@ -1694,7 +1723,31 @@ pub fn resume_with_answer(
         working_dir,
         project,
         mcp_server_port,
-        Some(answer),
+        Some(Resume::Answer(answer)),
+    )
+}
+
+/// Restart a task's agent along the lines the user discussed with it.
+///
+/// The other half of "chat about this": the conversation is stored without
+/// touching anything, and this is what acts on it. Reuses the worktree, so
+/// redirecting the approach costs none of the work already done, and leaves
+/// `revision_count` alone — a discussion is not a rejection.
+pub fn resume_with_discussion(
+    task: &tasks::Task,
+    app: AppHandle,
+    working_dir: &str,
+    project: &projects::Project,
+    mcp_server_port: u16,
+    thread: &str,
+) -> bool {
+    start_inner(
+        task,
+        app,
+        working_dir,
+        project,
+        mcp_server_port,
+        Some(Resume::Discussion(thread)),
     )
 }
 
@@ -1704,7 +1757,7 @@ fn start_inner(
     working_dir: &str,
     project: &projects::Project,
     mcp_server_port: u16,
-    resume_answer: Option<&str>,
+    resume: Option<Resume>,
 ) -> bool {
     let task_id = task.id;
     let db = db::get_db();
@@ -1749,7 +1802,7 @@ fn start_inner(
 
     // Create isolated worktree (or just branch) BEFORE building prompt so branch name is included in instructions
     let mut task_clone = task.clone();
-    let (effective_dir, branch_opt) = if resume_answer.is_some() {
+    let (effective_dir, branch_opt) = if resume.is_some() {
         // A resume continues work that is already on disk. ensure_task_worktree
         // would remove the worktree and build a clean one whenever its in-memory
         // record is missing, which is always the case after a restart — and a
@@ -1809,8 +1862,8 @@ fn start_inner(
         template.as_ref(),
         Some(project),
     );
-    let prompt = match resume_answer {
-        Some(answer) => build_resume_prompt(answer, &prompt),
+    let prompt = match resume {
+        Some(r) => build_resume_prompt(r, &prompt),
         None => prompt,
     };
     let model = task.model.as_deref().unwrap_or("sonnet");
@@ -1877,7 +1930,7 @@ fn start_inner(
     // Build CLI arguments. A resume passes the stored session id when there is
     // one; sessions expire, and Claude falling back to a fresh one is recoverable
     // because the answer and the original task are both in the prompt.
-    let resume_session = resume_answer.and(task.claude_session_id.as_deref());
+    let resume_session = resume.and(task.claude_session_id.as_deref());
     let args = build_claude_args(
         &prompt,
         model,
@@ -2842,13 +2895,31 @@ mod tests {
 
     #[test]
     fn the_answer_is_injected_into_the_resumed_prompt() {
-        let prompt = build_resume_prompt("Use PKCE, and skip the implicit flow", "original task");
+        let prompt = build_resume_prompt(
+            Resume::Answer("Use PKCE, and skip the implicit flow"),
+            "original task",
+        );
 
         assert!(prompt.contains("PKCE"));
         assert!(prompt.contains("original task"));
         // A resumed agent that starts over throws away the work this whole
         // feature exists to keep.
         assert!(prompt.contains("do not start over"));
+    }
+
+    #[test]
+    fn a_discussion_is_injected_as_a_conversation_not_an_answer() {
+        let thread = "User: why the join table?\n\nYou: for the many-to-many";
+        let prompt = build_resume_prompt(Resume::Discussion(thread), "original task");
+
+        assert!(prompt.contains("join table"));
+        assert!(prompt.contains("original task"));
+        assert!(prompt.contains("do not start over"));
+        // A discussion redirects the approach, so it has to outrank what the agent
+        // decided before it — otherwise the conversation changes nothing.
+        assert!(prompt.contains("follow the discussion"));
+        // And it is not an answer to a question the agent asked.
+        assert!(!prompt.contains("You asked a question"));
     }
 
     #[test]

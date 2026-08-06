@@ -14,6 +14,7 @@ import {
   FlaskConical,
   Layers,
   Link2,
+  MessageSquare,
 } from 'lucide-react';
 import { TagList } from '../board/TagBadge';
 import { api } from '../../lib/api';
@@ -31,6 +32,7 @@ import ArtifactPicker from '../artifacts/ArtifactPicker';
 import { TaskRevisionsTab } from './TaskRevisionsTab';
 import { TaskDependenciesTab } from './TaskDependenciesTab';
 import BlockerPanel from '../board/BlockerPanel';
+import DiscussionPanel from '../board/DiscussionPanel';
 import { tauriListen } from '../../lib/tauriEvents';
 
 export default function TaskDetailModal({ task, onClose, onStatusChange }) {
@@ -47,6 +49,7 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
   const [addDepId, setAddDepId] = useState('');
   const [addDepDirection, setAddDepDirection] = useState('parent'); // parent = "this depends on X"
   const [blocker, setBlocker] = useState(null);
+  const [discussion, setDiscussion] = useState([]);
 
   const loadBlocker = useCallback(() => {
     api
@@ -57,6 +60,10 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
 
   useEffect(() => {
     loadBlocker();
+    api
+      .getDiscussion(task.id)
+      .then(setDiscussion)
+      .catch(() => setDiscussion([]));
     // The agent can raise a question while this modal is open, and the board is
     // event-driven with no polling.
     return tauriListen('blocker:raised', (payload) => {
@@ -81,6 +88,26 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
   const cancelBlocker = async () => {
     try {
       await api.cancelBlocker(blocker.id);
+      setBlocker(null);
+    } catch {
+      /* surfaced by notifyError */
+    }
+  };
+
+  const postDiscussion = async (body) => {
+    try {
+      setDiscussion(await api.postDiscussionMessage(task.id, body));
+    } catch {
+      /* surfaced by notifyError */
+    }
+  };
+
+  const resumeDiscussion = async () => {
+    try {
+      await api.resumeWithDiscussion(task.id);
+      // The agent is running again with the thread as context, and any question it
+      // had open was closed as moot.
+      setCurrentStatus('in_progress');
       setBlocker(null);
     } catch {
       /* surfaced by notifyError */
@@ -145,6 +172,7 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
     { id: 'revisions', label: t('detail.revisions'), icon: RotateCcw, show: hasRevisions },
     { id: 'dependencies', label: t('detail.dependencies') || 'Dependencies', icon: Link2, always: true },
     { id: 'documents', label: t('detail.documents'), icon: FileText, always: true },
+    { id: 'discussion', label: t('discussion.title'), icon: MessageSquare, always: true },
     { id: 'replay', label: t('detail.replay'), icon: Activity, always: true },
   ].filter((tab) => tab.always || tab.show);
 
@@ -284,6 +312,15 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
                   setAddDepId={setAddDepId}
                   addDepDirection={addDepDirection}
                   setAddDepDirection={setAddDepDirection}
+                />
+              )}
+
+              {activeTab === 'discussion' && (
+                <DiscussionPanel
+                  messages={discussion}
+                  onPost={postDiscussion}
+                  onResume={resumeDiscussion}
+                  canResume={currentStatus !== 'in_progress' && currentStatus !== 'testing'}
                 />
               )}
 
