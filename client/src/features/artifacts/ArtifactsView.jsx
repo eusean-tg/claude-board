@@ -375,7 +375,11 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
           )}
         </div>
 
-        <div className="flex-1 min-h-0 flex flex-col">
+        {/* min-w-0 as well as min-h-0: a flex item defaults to min-width:auto, so
+            without it a wide table or a long code line in the document stops this
+            pane from shrinking and pushes the whole page sideways rather than
+            scrolling inside itself. */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
           {!selected ? (
             <div className="flex-1 flex items-center justify-center text-surface-500 text-sm">
               {t('artifacts.selectPrompt')}

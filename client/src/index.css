@@ -218,6 +218,36 @@
   border-left: 1px solid #3d372e !important;
 }
 
+/* Rendered markdown must stay inside its pane.
+   Prose wraps, including long unbroken strings — a URL or an absolute path has no
+   space to break at, and `word-wrap` alone leaves it sticking out of the column.
+   Code blocks wrap rather than scroll so nothing is hidden off the right edge.
+   Tables are the exception: wrapping cells makes them unreadable, so they get
+   their own horizontal scroll. */
+.wmde-markdown {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.wmde-markdown pre,
+.wmde-markdown pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.wmde-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.wmde-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
 /* Compact markdown preview in task detail */
 .md-preview-compact .wmde-markdown {
   background-color: transparent !important;
