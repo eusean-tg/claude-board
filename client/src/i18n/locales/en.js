@@ -142,14 +142,14 @@ export default {
 
   // ─── Prerequisites ───
   'prerequisites.title': 'Run prerequisites first',
-  'prerequisites.body': 'This task depends on work that has not finished. {{count}} tasks will run, in this order:',
+  'prerequisites.body': 'This task depends on work that has not finished. {count} tasks will run, in this order:',
   'prerequisites.target': 'the task you started',
   'prerequisites.together': 'these run at the same time',
   'prerequisites.trunk': 'Shared branch:',
-  'prerequisites.confirm': 'Run {{count}} tasks',
+  'prerequisites.confirm': 'Run {count} tasks',
   'prerequisites.starting': 'Starting...',
   'prerequisites.cancel': 'Cancel',
-  'toast.prerequisitesStarted': 'Started {{count}} tasks',
+  'toast.prerequisitesStarted': 'Started {count} tasks',
 
   // ─── Discussion ───
   'discussion.title': 'Discussion',
@@ -172,7 +172,7 @@ export default {
   'card.viewLogs': 'View Logs',
   'card.moveTo': 'Move to',
   'card.rev': 'Rev',
-  'card.waitingOn': 'waiting on {{count}}',
+  'card.waitingOn': 'waiting on {count}',
   'card.sharedBranch': 'Shared branch for this run',
 
   // ─── List View ───
@@ -979,7 +979,7 @@ export default {
   'scan.custom': 'Custom',
   'scan.customPromptPlaceholder': 'Describe what you want the scan to focus on...',
   'scan.prescanInfo': 'Project info',
-  'scan.filesDetected': '{{count}} files detected',
+  'scan.filesDetected': '{count} files detected',
   'scan.estimatedTime': 'Estimated',
   'scan.cancel': 'Cancel',
   'scan.analyzing': 'Analyzing codebase...',
@@ -993,7 +993,7 @@ export default {
   'scan.noHistory': 'No previous scans found.',
   'scan.deleteConfirm': 'Delete this scan?',
   'scan.largeCodebaseWarning':
-    'Large codebase detected ({{count}} files). Detailed scan may take several minutes. Consider using Quick scan.',
+    'Large codebase detected ({count} files). Detailed scan may take several minutes. Consider using Quick scan.',
   'scan.collectingStats': 'Collecting stats...',
   'scan.generatingReport': 'Generating report...',
 
