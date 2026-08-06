@@ -241,6 +241,15 @@ pub(crate) fn generate_branch_slug(title: &str) -> String {
 /// Resolve the effective working directory for a task.
 /// If auto_branch is enabled, creates a git worktree for isolation.
 /// Returns (effective_working_dir, Option<branch_name>).
+/// The branch a task's worktree should start from.
+///
+/// Its group's trunk when it has one, the project's base branch otherwise. Kept as
+/// its own function so the choice is stated in one place rather than inline in a
+/// hundred-line worktree routine.
+fn resolve_task_base(trunk: Option<&str>, project_base: &str) -> String {
+    trunk.unwrap_or(project_base).to_string()
+}
+
 /// The worktree a task already has, if it still exists on disk.
 ///
 /// Checks `TASK_WORKTREES` first and the conventional path second. The map only
@@ -368,7 +377,16 @@ fn ensure_task_worktree(
             slug
         )
     }));
-    let base = project.pr_base_branch.as_deref().unwrap_or("main");
+    // A grouped task starts from its group's trunk, which already carries every
+    // dependency that has landed. Branching from the base instead is what left a
+    // dependent task unable to see the work it was told it depends on, and had the
+    // agent hunting for sibling branches and merging them by hand.
+    let trunk = crate::db::task_groups::for_task(db, task.id).map(|g| g.trunk_branch);
+    let base = resolve_task_base(
+        trunk.as_deref(),
+        project.pr_base_branch.as_deref().unwrap_or("main"),
+    );
+    let base = base.as_str();
 
     // For revisions, reuse existing worktree.
     //
@@ -2891,6 +2909,126 @@ mod tests {
             "auto_branch": 1, "pr_base_branch": base,
         }))
         .unwrap()
+    }
+
+    /// Inserts the project and task rows the group tables have foreign keys on.
+    fn seed_rows(db: &DbPool, task_id: i64) {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+             VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+             VALUES (?1,1,'Add auth','backlog')",
+            rusqlite::params![task_id],
+        )
+        .unwrap();
+    }
+
+    fn commit_on_branch(root: &Path, branch: &str, file: &str, body: &str) {
+        assert!(git(&["checkout", "--quiet", branch], root));
+        std::fs::write(root.join(file), body).unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", file], root));
+        assert!(git(&["checkout", "--quiet", "main"], root));
+    }
+
+    #[test]
+    fn a_grouped_task_branches_from_the_trunk_so_it_can_see_its_dependencies() {
+        // The assertion this whole plan exists for: a dependent task's checkout
+        // contains its dependency's code, so no agent has to find and merge
+        // sibling branches by hand.
+        let root = repo("worktree-trunk");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/g", "dep.txt", "from the dependency\n");
+        let db = test_db();
+        seed_rows(&db, 50);
+        crate::db::task_groups::create(&db, 1, "trunk/feature/g", "main", 50, &[50]).unwrap();
+
+        let (effective_dir, branch) =
+            ensure_task_worktree(&task_json(50, 0), &dir, &project_json("main"), &db);
+
+        assert!(
+            Path::new(&effective_dir).join("dep.txt").exists(),
+            "the dependency's work is missing from {effective_dir}"
+        );
+        assert!(branch.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_still_branches_from_the_base() {
+        let root = repo("worktree-no-group");
+        let dir = root.to_string_lossy().to_string();
+        // A trunk exists in the repo but this task is not in its group.
+        assert!(git(&["branch", "trunk/feature/other", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/other", "other.txt", "not mine\n");
+        let db = test_db();
+        seed_rows(&db, 51);
+
+        let (effective_dir, _) =
+            ensure_task_worktree(&task_json(51, 0), &dir, &project_json("main"), &db);
+
+        // Picking up an unrelated group's trunk would drag its work into this task.
+        assert!(!Path::new(&effective_dir).join("other.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_finished_group_does_not_send_a_task_to_a_deleted_trunk() {
+        let root = repo("worktree-finished-group");
+        let dir = root.to_string_lossy().to_string();
+        let db = test_db();
+        seed_rows(&db, 52);
+        let group = crate::db::task_groups::create(&db, 1, "trunk/feature/gone", "main", 52, &[52])
+            .unwrap();
+        // The group landed and its trunk was deleted; the branch never existed here.
+        crate::db::task_groups::finish(&db, group, crate::db::task_groups::STATUS_COMPLETED)
+            .unwrap();
+
+        let (effective_dir, branch) =
+            ensure_task_worktree(&task_json(52, 0), &dir, &project_json("main"), &db);
+
+        // Falling back to the base is what keeps this working; branching from a ref
+        // that is gone drops the task into the shared working directory instead.
+        assert!(effective_dir.contains("task-52"), "got {effective_dir}");
+        assert!(branch.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_revision_still_reuses_its_worktree_rather_than_rebuilding_from_the_trunk() {
+        let root = repo("worktree-group-revision");
+        let dir = root.to_string_lossy().to_string();
+        let wt = seed_task_worktree(&root, 53);
+        std::fs::write(wt.join("in-flight.txt"), "unfinished\n").unwrap();
+        TASK_WORKTREES.lock().remove(&53);
+        assert!(git(&["branch", "trunk/feature/r", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 53);
+        crate::db::task_groups::create(&db, 1, "trunk/feature/r", "main", 53, &[53]).unwrap();
+
+        let (effective_dir, _) =
+            ensure_task_worktree(&task_json(53, 1), &dir, &project_json("main"), &db);
+
+        // Group membership must not reintroduce the rebuild that destroys work: a
+        // revision continues where it left off, trunk or no trunk.
+        assert_eq!(effective_dir, wt.to_string_lossy());
+        assert!(wt.join("in-flight.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_base_falls_back_only_when_there_is_no_trunk() {
+        assert_eq!(
+            resolve_task_base(Some("trunk/feature/g"), "main"),
+            "trunk/feature/g"
+        );
+        assert_eq!(resolve_task_base(None, "main"), "main");
     }
 
     #[test]
