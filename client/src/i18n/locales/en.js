@@ -252,6 +252,8 @@ export default {
   'projectModal.autoQueueDisabled': 'Auto Queue Disabled',
   'projectModal.autoQueueDesc': 'Auto-start backlog tasks when a running task finishes',
   'projectModal.maxConcurrent': 'Max Concurrent',
+  'projectModal.maxConcurrentDesc':
+    'The most tasks this project runs at once, including the prerequisites of a dependency chain',
   'projectModal.permissionMode': 'Permission Mode',
   'projectModal.autoBranch': 'Auto Branch',
   'projectModal.autoBranchDesc': 'Create feature branch per task',
