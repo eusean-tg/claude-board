@@ -11,6 +11,7 @@ export function useTaskHandlers({
   addToast,
   t,
   setConfirm,
+  setPrerequisites,
   terminal,
   setSelectedTask,
   setActivePanel,
@@ -25,6 +26,33 @@ export function useTaskHandlers({
       const fromStatus = task.status || 'backlog';
 
       if (newStatus === 'in_progress' && fromStatus !== 'in_progress') {
+        // Ask what would run before offering to start it. A task with unfinished
+        // prerequisites is refused by the backend, and reacting to that refusal
+        // would show an error for something the user is allowed to do — so the plan
+        // is fetched first and a different, larger confirmation is shown.
+        let waves = [];
+        try {
+          waves = (await api.planPrerequisites(taskId)) || [];
+        } catch {
+          // The plan is a convenience; a failure here must not block a start.
+        }
+        if (waves.length > 1) {
+          setPrerequisites({
+            waves,
+            onConfirm: async () => {
+              try {
+                const result = await api.startTaskWithPrerequisites(taskId);
+                setPrerequisites(null);
+                addToast(t('toast.prerequisitesStarted', { count: result?.queued?.length ?? 0 }), 'success');
+              } catch (e) {
+                addToast(e.message, 'error');
+              }
+            },
+            onClose: () => setPrerequisites(null),
+          });
+          return;
+        }
+
         setConfirm({
           title: t('toast.startClaude'),
           message: `Moving "${task.title}" to In Progress will automatically start Claude. Continue?`,
@@ -62,7 +90,7 @@ export function useTaskHandlers({
         pendingUpdates.delete(taskId);
       }
     },
-    [tasks, addToast, t, setTasks, setConfirm],
+    [tasks, addToast, t, setTasks, setConfirm, setPrerequisites],
   );
 
   const onCreate = useCallback(

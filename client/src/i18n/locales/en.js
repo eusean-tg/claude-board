@@ -140,6 +140,17 @@ export default {
   'blocker.answerPlaceholder': 'Type your answer',
   'blocker.waiting': 'Waiting for your answer',
 
+  // ─── Prerequisites ───
+  'prerequisites.title': 'Run prerequisites first',
+  'prerequisites.body': 'This task depends on work that has not finished. {{count}} tasks will run, in this order:',
+  'prerequisites.target': 'the task you started',
+  'prerequisites.together': 'these run at the same time',
+  'prerequisites.trunk': 'Shared branch:',
+  'prerequisites.confirm': 'Run {{count}} tasks',
+  'prerequisites.starting': 'Starting...',
+  'prerequisites.cancel': 'Cancel',
+  'toast.prerequisitesStarted': 'Started {{count}} tasks',
+
   // ─── Discussion ───
   'discussion.title': 'Discussion',
   'discussion.empty': 'Talk through the approach here. Nothing you write changes the work.',

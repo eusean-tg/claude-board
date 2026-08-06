@@ -40,6 +40,8 @@ function AppInner() {
   const [activePanel, setActivePanel] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [confirm, setConfirm] = useState(null);
+  // The larger confirmation shown when starting a task means starting a chain.
+  const [prerequisites, setPrerequisites] = useState(null);
   const [search, setSearch] = useState('');
   const [updateInfo, setUpdateInfo] = useState(null);
   const [templates, setTemplates] = useState([]);
@@ -52,6 +54,7 @@ function AppInner() {
     addToast,
     t,
     setConfirm,
+    setPrerequisites,
     terminal,
     setSelectedTask,
     setActivePanel,
@@ -293,6 +296,7 @@ function AppInner() {
         search={search}
         toasts={toasts}
         confirm={confirm}
+        prerequisites={prerequisites}
         templates={templates}
         roles={roles}
         modals={modals}

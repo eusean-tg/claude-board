@@ -14,6 +14,7 @@ import TemplatesModal from '../features/templates/TemplatesModal';
 import WebhooksModal from '../features/webhooks/WebhooksModal';
 import RolesModal from '../features/roles/RolesModal';
 import ConfirmDialog from '../components/ConfirmDialog';
+import PrerequisiteModal from '../features/board/PrerequisiteModal';
 import Toast from '../components/Toast';
 import TerminalBottomPanel from './TerminalBottomPanel';
 import { VoiceAssistantProvider } from '../features/voice/VoiceAssistantProvider';
@@ -38,6 +39,7 @@ export default function AppLayout({
   search,
   toasts,
   confirm,
+  prerequisites,
   templates,
   roles,
   modals,
@@ -270,6 +272,7 @@ export default function AppLayout({
         </ErrorBoundary>
       )}
       {confirm && <ConfirmDialog {...confirm} />}
+      {prerequisites && <PrerequisiteModal {...prerequisites} />}
       <Toast toasts={toasts} />
       {/* Voice assistant temporarily disabled
       <VoiceAssistantProvider
