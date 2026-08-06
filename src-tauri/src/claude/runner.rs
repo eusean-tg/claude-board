@@ -527,7 +527,10 @@ fn scan_git_info(working_dir: &str, task_id: i64, db: &DbPool) {
         "--oneline",
         "-10",
         "--no-merges",
-        "--format=%H|%h|%s|%an|%ai",
+        // %aI, not %ai: %ai emits "2026-08-06 12:36:47 +0800", which the
+        // WebKit engine Tauri uses on macOS refuses to parse, so the commit
+        // list rendered every date as "Invalid Date". %aI is strict ISO 8601.
+        "--format=%H|%h|%s|%an|%aI",
     ])
     .unwrap_or_default();
     let commits: Vec<serde_json::Value> = log_output

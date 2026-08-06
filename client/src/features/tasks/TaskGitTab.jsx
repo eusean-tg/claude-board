@@ -1,3 +1,4 @@
+import { formatGitDate } from '../../lib/formatters';
 import { useState } from 'react';
 import {
   GitCommit,
@@ -56,7 +57,7 @@ export function TaskGitTab({ d, detail, task, hasGit }) {
                         {c.author}
                       </span>
                     )}
-                    {c.date && <span>{new Date(c.date).toLocaleDateString()}</span>}
+                    {formatGitDate(c.date) && <span>{formatGitDate(c.date)}</span>}
                   </div>
                 </div>
               </div>

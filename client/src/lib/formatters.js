@@ -67,3 +67,39 @@ export function shortenPath(path) {
   if (parts.length <= 3) return parts.join('/');
   return '\u2026/' + parts.slice(-3).join('/');
 }
+
+// "2026-08-06 12:36:47 +0800" (git's %ai) and "2026-08-06T12:36:47+08:00" (%aI).
+const GIT_DATE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}):?(\d{2})$/;
+
+/**
+ * A git date as strict ISO 8601, or the input unchanged when it is not a git date.
+ *
+ * Normalisation happens before parsing rather than after a failed attempt,
+ * because whether an engine accepts the space-separated `%ai` form differs
+ * between them: Node takes it, the WebKit engine Tauri uses on macOS does not.
+ * Leaning on that leniency is what let "Invalid Date" reach the commit list while
+ * every test passed.
+ */
+export function gitDateToIso(value) {
+  const raw = String(value ?? '').trim();
+  const m = raw.match(GIT_DATE);
+  return m ? `${m[1]}T${m[2]}${m[3]}:${m[4]}` : raw;
+}
+
+/**
+ * Parse a git author/commit date, in either format git has been asked for.
+ *
+ * Returns null for anything unparseable, so callers render nothing rather than
+ * the words "Invalid Date".
+ */
+export function parseGitDate(value) {
+  if (!value) return null;
+  const parsed = new Date(gitDateToIso(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/** A commit date as a short local date, or '' when it cannot be read. */
+export function formatGitDate(value) {
+  const parsed = parseGitDate(value);
+  return parsed ? parsed.toLocaleDateString() : '';
+}
