@@ -7,6 +7,7 @@ pub mod gsd;
 pub mod http_api;
 pub mod model_catalog;
 pub mod notification;
+pub mod orchestration;
 pub mod pr_providers;
 pub mod queue;
 pub mod scanner;

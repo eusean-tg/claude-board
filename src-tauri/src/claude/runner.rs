@@ -208,13 +208,13 @@ fn kill_process(pid: u32) {
 
 /// Sanitize a branch name to only allow safe git ref characters.
 /// Permits alphanumeric, dash, underscore, slash, and dot.
-fn sanitize_branch_name(name: &str) -> String {
+pub(crate) fn sanitize_branch_name(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '/' || *c == '.')
         .collect::<String>()
 }
 
-fn generate_branch_slug(title: &str) -> String {
+pub(crate) fn generate_branch_slug(title: &str) -> String {
     title
         .to_lowercase()
         .replace(['ç', 'Ç'], "c")
