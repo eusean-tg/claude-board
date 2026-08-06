@@ -174,6 +174,8 @@ export default {
   'card.rev': 'Rev',
   'card.waitingOn': 'waiting on {count}',
   'card.sharedBranch': 'Shared branch for this run',
+  'card.runStopped': 'This run stopped — merge {trunk} by hand, then start this task again',
+  'card.runStoppedShort': 'run stopped',
 
   // ─── List View ───
   'list.title': 'Title',

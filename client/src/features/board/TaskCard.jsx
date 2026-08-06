@@ -312,13 +312,22 @@ const TaskCard = memo(function TaskCard({
                 {t('card.waitingOn', { count: task.waiting_on })}
               </span>
             )}
+            {/* A stopped run is the only thing on a card that needs a person and
+                says nothing about the task's own status: every task in it reports
+                something that looks fine. Red and named, or it reads as routine. */}
             {task.trunk_branch && (
               <span
-                className="flex items-center gap-1 text-[10px] font-medium text-surface-400 bg-surface-700/50 px-1.5 py-0.5 rounded max-w-full"
-                title={t('card.sharedBranch')}
+                className={`flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full ${
+                  task.run_stopped ? 'text-red-400 bg-red-500/10' : 'text-surface-400 bg-surface-700/50'
+                }`}
+                title={task.run_stopped ? t('card.runStopped', { trunk: task.trunk_branch }) : t('card.sharedBranch')}
               >
-                <GitBranch size={10} className="flex-shrink-0" />
-                <span className="truncate">{task.trunk_branch}</span>
+                {task.run_stopped ? (
+                  <AlertTriangle size={10} className="flex-shrink-0" />
+                ) : (
+                  <GitBranch size={10} className="flex-shrink-0" />
+                )}
+                <span className="truncate">{task.run_stopped ? t('card.runStoppedShort') : task.trunk_branch}</span>
               </span>
             )}
             {/* Ahead of the running marker: a blocked task is waiting on a person,

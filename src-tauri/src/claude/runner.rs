@@ -385,7 +385,10 @@ fn ensure_task_worktree(
     // dependency that has landed. Branching from the base instead is what left a
     // dependent task unable to see the work it was told it depends on, and had the
     // agent hunting for sibling branches and merging them by hand.
-    let trunk = crate::db::task_groups::for_task(db, task.id).map(|g| g.trunk_branch);
+    //
+    // A stopped run counts. Starting one of its members by hand should still put the
+    // task on the trunk holding the run's work; the base branch has none of it.
+    let trunk = crate::db::task_groups::trunk_for_task(db, task.id);
     let base = resolve_task_base(
         trunk.as_deref(),
         project.pr_base_branch.as_deref().unwrap_or("main"),
@@ -868,10 +871,12 @@ pub fn stop_group_after_failed_merge(
         return false;
     }
 
+    // set_status, not finish(): a stopped run keeps its membership. That is what the
+    // board reads to mark the cards waiting on it, and what resolving it acts on.
     if let Err(e) =
-        crate::db::task_groups::finish(db, group.id, crate::db::task_groups::STATUS_FAILED)
+        crate::db::task_groups::set_status(db, group.id, crate::db::task_groups::STATUS_STOPPED)
     {
-        log::error!("could not fail group {}: {}", group.id, e);
+        log::error!("could not stop group {}: {}", group.id, e);
     }
 
     let msg = format!(
@@ -889,10 +894,22 @@ pub fn stop_group_after_failed_merge(
             db,
             task.project_id,
             Some(task_id),
-            "group_failed",
+            "run_stopped",
             &format!("Dependency run stopped: {} was not merged", branch),
             None,
         );
+        if let Some(app) = app {
+            // The same treatment a raised blocker gets, for the same reason: the run
+            // is waiting on a person and nothing else on the board looks wrong.
+            crate::services::notification::notify_run_stopped(
+                app,
+                &crate::services::notification::TaskNotification::new(
+                    &task.title,
+                    task.task_key.as_deref(),
+                ),
+                base,
+            );
+        }
     }
     if let Some(app) = app {
         app.emit(
@@ -956,7 +973,7 @@ pub fn cleanup_task_branch(
     project: &projects::Project,
     db: &DbPool,
 ) -> BranchCleanup {
-    let trunk = crate::db::task_groups::for_task(db, task.id).map(|g| g.trunk_branch);
+    let trunk = crate::db::task_groups::trunk_for_task(db, task.id);
     cleanup_task_branch_in(task, working_dir, project, trunk.as_deref())
 }
 
@@ -3523,13 +3540,22 @@ mod tests {
             stopped,
             "a refused trunk merge has to stop the run: {outcome:?}"
         );
+        // Stopped, not failed: the run is waiting on a person rather than over.
         assert_eq!(
             crate::db::task_groups::get(&db, group).unwrap().status,
-            crate::db::task_groups::STATUS_FAILED
+            crate::db::task_groups::STATUS_STOPPED
         );
+        // Membership survives, because that is what tells the board which cards are
+        // stranded and what resolving the run has to act on.
+        assert_eq!(crate::db::task_groups::members(&db, group), vec![71, 72]);
         // Task 72 was going to build on work that is not on the trunk. Nothing may
         // start it as part of this run.
         assert!(crate::db::task_groups::for_task(&db, 72).is_none());
+        // Its work still belongs on the trunk if it is ever run by hand.
+        assert_eq!(
+            crate::db::task_groups::trunk_for_task(&db, 72).as_deref(),
+            Some("trunk/feature/st")
+        );
         // And the trunk must not land later either, however 72 ends up finishing.
         set_task_status(&db, 72, "done");
         assert!(finish_group_if_complete(&db, 72, &dir, &project_with_merge(&dir, 1)).is_none());

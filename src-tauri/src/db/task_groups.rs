@@ -17,6 +17,13 @@ use serde::Serialize;
 pub const STATUS_ACTIVE: &str = "active";
 pub const STATUS_COMPLETED: &str = "completed";
 pub const STATUS_FAILED: &str = "failed";
+/// The run needs a person before it can go on: a member's work could not reach the
+/// trunk, so the tasks after it were not started.
+///
+/// Distinct from `failed`, which is a run that is over. A stopped run keeps its
+/// membership, because that is what the board reads to say which cards are waiting
+/// on it and what a resolution has to act on.
+pub const STATUS_STOPPED: &str = "stopped";
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TaskGroup {
@@ -119,15 +126,22 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
     .ok()
 }
 
-/// Trunk branch per task, for every task in a live group in this project.
+/// Trunk branch and run status per task, for every task in a live or stopped group.
+///
+/// Stopped runs are included because a card whose run needs attention is exactly
+/// what the board has to show; filtering to active made the marker vanish at the
+/// moment it mattered most.
 ///
 /// One query for the whole board rather than `for_task` per card.
-pub fn trunks_by_task(db: &DbPool, project_id: i64) -> std::collections::HashMap<i64, String> {
+pub fn trunks_by_task(
+    db: &DbPool,
+    project_id: i64,
+) -> std::collections::HashMap<i64, (String, String)> {
     let conn = db.lock();
     let mut stmt = match conn.prepare(
-        "SELECT m.task_id, g.trunk_branch FROM task_groups g
+        "SELECT m.task_id, g.trunk_branch, g.status FROM task_groups g
          JOIN task_group_members m ON m.group_id = g.id
-         WHERE g.project_id = ?1 AND g.status = 'active'",
+         WHERE g.project_id = ?1 AND g.status IN ('active','stopped')",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -137,12 +151,63 @@ pub fn trunks_by_task(db: &DbPool, project_id: i64) -> std::collections::HashMap
     };
     let mut out = std::collections::HashMap::new();
     match stmt.query_map(params![project_id], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+        ))
     }) {
         Ok(rows) => out.extend(rows.flatten()),
         Err(e) => log::error!("trunks_by_task: {}", e),
     }
     out
+}
+
+/// The trunk a task's work belongs on, whether or not its run is still live.
+///
+/// Branch cleanup needs this rather than [`for_task`]: a member still running when
+/// the run stopped has to merge onto the trunk when it finishes like every other
+/// member. Resolving no trunk would send it at the project's base branch instead.
+pub fn trunk_for_task(db: &DbPool, task_id: i64) -> Option<String> {
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT g.trunk_branch FROM task_groups g
+         JOIN task_group_members m ON m.group_id = g.id
+         WHERE m.task_id = ?1 AND g.status IN ('active','stopped')",
+        params![task_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Close a stopped run and release its tasks, so they can be claimed again.
+///
+/// The escape hatch for a run nobody is going to resolve: without it a stopped
+/// run's members are claimed for good and can never be started in another chain.
+pub fn abandon_stopped(db: &DbPool, task_ids: &[i64]) -> Vec<i64> {
+    let stopped: Vec<i64> = {
+        let conn = db.lock();
+        let mut ids = Vec::new();
+        for id in task_ids {
+            if let Ok(gid) = conn.query_row(
+                "SELECT g.id FROM task_groups g
+                 JOIN task_group_members m ON m.group_id = g.id
+                 WHERE m.task_id = ?1 AND g.status = 'stopped'",
+                params![id],
+                |r| r.get::<_, i64>(0),
+            ) {
+                if !ids.contains(&gid) {
+                    ids.push(gid);
+                }
+            }
+        }
+        ids
+    };
+    for gid in &stopped {
+        if let Err(e) = finish(db, *gid, STATUS_FAILED) {
+            log::error!("could not abandon stopped group {}: {}", gid, e);
+        }
+    }
+    stopped
 }
 
 /// Task ids in a group, in the order they were added.
@@ -166,7 +231,10 @@ pub fn members(db: &DbPool, group_id: i64) -> Vec<i64> {
 }
 
 pub fn set_status(db: &DbPool, group_id: i64, status: &str) -> Result<(), AppError> {
-    if !matches!(status, STATUS_ACTIVE | STATUS_COMPLETED | STATUS_FAILED) {
+    if !matches!(
+        status,
+        STATUS_ACTIVE | STATUS_COMPLETED | STATUS_FAILED | STATUS_STOPPED
+    ) {
         return Err(AppError::Validation(format!("unknown status: {}", status)));
     }
     let conn = db.lock();
@@ -338,12 +406,73 @@ mod tests {
 
         let map = trunks_by_task(&db, 1);
 
-        assert_eq!(map.get(&a).map(String::as_str), Some("trunk/live"));
-        assert_eq!(map.get(&b).map(String::as_str), Some("trunk/live"));
+        assert_eq!(
+            map.get(&a),
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+        );
+        assert_eq!(
+            map.get(&b),
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+        );
         // A landed group's trunk is deleted, so showing it on a card would name a
         // branch that is gone.
         assert!(!map.contains_key(&done_member));
         assert_eq!(get(&db, live).unwrap().status, STATUS_ACTIVE);
+    }
+
+    #[test]
+    fn a_stopped_run_still_reaches_the_board() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let id = create(&db, 1, "trunk/stopped", "main", b, &[a, b]).unwrap();
+        set_status(&db, id, STATUS_STOPPED).unwrap();
+
+        let map = trunks_by_task(&db, 1);
+
+        // The moment a run needs attention is the moment its cards have to say so.
+        // Filtering to active made the marker disappear exactly then.
+        assert_eq!(
+            map.get(&a),
+            Some(&("trunk/stopped".to_string(), STATUS_STOPPED.to_string()))
+        );
+        // And the trunk still resolves, so a member finishing late lands on it
+        // rather than on the project's base branch.
+        assert_eq!(trunk_for_task(&db, a).as_deref(), Some("trunk/stopped"));
+        // A stopped run is not live: nothing may start its remaining members or
+        // try to land its trunk.
+        assert!(for_task(&db, a).is_none());
+    }
+
+    #[test]
+    fn abandoning_a_stopped_run_releases_its_tasks() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let id = create(&db, 1, "trunk/give-up", "main", b, &[a, b]).unwrap();
+        set_status(&db, id, STATUS_STOPPED).unwrap();
+
+        let closed = abandon_stopped(&db, &[a, b]);
+
+        // Without this a stopped run nobody resolves claims its tasks for good.
+        assert_eq!(closed, vec![id]);
+        assert_eq!(get(&db, id).unwrap().status, STATUS_FAILED);
+        assert!(members(&db, id).is_empty());
+        assert!(trunk_for_task(&db, a).is_none());
+        // Claimable again: a new run over the same tasks must be allowed.
+        assert!(create(&db, 1, "trunk/again", "main", b, &[a, b]).is_ok());
+    }
+
+    #[test]
+    fn abandoning_leaves_a_live_run_alone() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let id = create(&db, 1, "trunk/live", "main", a, &[a]).unwrap();
+
+        // Only a stopped run is up for abandonment. Closing a running one would
+        // orphan the agents working inside it.
+        assert!(abandon_stopped(&db, &[a]).is_empty());
+        assert_eq!(get(&db, id).unwrap().status, STATUS_ACTIVE);
     }
 
     #[test]

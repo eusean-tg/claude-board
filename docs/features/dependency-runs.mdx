@@ -93,7 +93,11 @@ after it were not started — the work they depend on is not on the trunk.
 
 The task itself still reports done and its commits are safe on its own branch, which is why this is said out loud: nothing else on the board looks wrong. Every task after it was told it depends on work that is not on the trunk, and running them against a premise that is false wastes the run and produces changes built on nothing.
 
-Merge the branch by hand, then start the stopped task again.
+A stopped run is announced three ways: a desktop notification, a red entry in the project's activity timeline, and a **run stopped** marker on the card of every task in the run, whose tooltip names the branch to merge.
+
+Merge the branch by hand, then start the stopped task again — it still branches from the trunk, so it picks up the work you merged.
+
+A stopped run keeps hold of its tasks, which is how those markers know what to show. Starting a fresh chain over any of them closes the stopped run first, so nothing is claimed forever by a run nobody is going to finish.
 
 <Note>
 Stopping the chain stops the chain. If [Auto-Queue](/features/queue) is on, a task whose prerequisites are marked done can still be picked up as ordinary ready work, because dependency readiness is a question about task status rather than about what reached a branch.

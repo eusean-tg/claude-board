@@ -57,6 +57,23 @@ describe('TaskCard dependency state', () => {
     expect(screen.getByText('trunk/feature/x')).toBeInTheDocument();
   });
 
+  it('says a run stopped instead of naming its branch', () => {
+    render(<TaskCard task={card({ trunk_branch: 'trunk/feature/x', run_stopped: true })} />);
+
+    // A stopped run needs a person, and every task in it still reports a status
+    // that looks fine — so the card has to say so rather than show a branch name
+    // indistinguishable from a healthy run's.
+    expect(screen.getByText('card.runStoppedShort')).toBeInTheDocument();
+    expect(screen.queryByText('trunk/feature/x')).not.toBeInTheDocument();
+  });
+
+  it('names the branch to merge in the marker title', () => {
+    render(<TaskCard task={card({ trunk_branch: 'trunk/feature/x', run_stopped: true })} />);
+
+    // The instruction has to reach the user somewhere: the label is too small for it.
+    expect(screen.getByTitle(/"trunk":"trunk\/feature\/x"/)).toBeInTheDocument();
+  });
+
   it('shows nothing about branches for an ungrouped task', () => {
     render(<TaskCard task={card()} />);
 

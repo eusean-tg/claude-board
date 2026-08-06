@@ -15,7 +15,10 @@ pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
             t.waiting_on = waiting.get(&t.id).copied().unwrap_or(0);
-            t.trunk_branch = trunks.get(&t.id).cloned();
+            if let Some((trunk, run_status)) = trunks.get(&t.id) {
+                t.trunk_branch = Some(trunk.clone());
+                t.run_stopped = run_status == crate::db::task_groups::STATUS_STOPPED;
+            }
             t
         })
         .collect()
@@ -233,6 +236,16 @@ pub fn start_task_with_prerequisites(
             "{} of these tasks already belong to another run",
             claimed.len()
         ));
+    }
+    // A stopped run keeps hold of its members so the board can mark them, and
+    // UNIQUE(task_id) would refuse the new membership rows. Starting a fresh run over
+    // those tasks is a decision to give up on the stopped one, so close it here
+    // rather than failing with a constraint error nobody can act on.
+    for closed in db::task_groups::abandon_stopped(&db, &member_ids) {
+        log::info!(
+            "closed stopped run {} to start a new one over its tasks",
+            closed
+        );
     }
 
     let trunk = orchestration::trunk_branch_name(&task);

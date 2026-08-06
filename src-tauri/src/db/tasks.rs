@@ -59,9 +59,14 @@ pub struct Task {
     /// computed from the graph when a list is read, the way `is_running` is.
     #[serde(default)]
     pub waiting_on: i64,
-    /// The shared branch of the group this task is running in, when it is in one.
+    /// The shared branch of the run this task belongs to, when it is in one.
     #[serde(default)]
     pub trunk_branch: Option<String>,
+    /// True when that run stopped and is waiting for someone to merge the trunk.
+    /// The card says so; without it a stranded task is indistinguishable from an
+    /// ordinary one sitting in Backlog.
+    #[serde(default)]
+    pub run_stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +141,7 @@ pub fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         is_running: false,
         waiting_on: 0,
         trunk_branch: None,
+        run_stopped: false,
     })
 }
 
