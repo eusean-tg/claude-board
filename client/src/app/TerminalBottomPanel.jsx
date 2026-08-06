@@ -114,13 +114,19 @@ export default function TerminalBottomPanel({ terminal, selectedTask, onSetSelec
       {/* ═══ Terminal content ═══ */}
       <div className={`flex-1 min-h-0 flex ${terminal.splitMode === 'horizontal' ? 'flex-col' : 'flex-row'}`}>
         {/* Primary pane */}
+        {/* min-w-0 as well as min-h-0, on every variant: this row is flex-row unless
+            the split is horizontal, and a flex item's min-width defaults to auto —
+            min-content. One long log line then made the pane wider than the tray, so
+            every line inside wrapped at that width and ran off the right of the
+            window. The pane has to be free to shrink and let its own scroller take
+            whatever cannot. */}
         <div
           className={
             isSplit
               ? terminal.splitMode === 'horizontal'
-                ? 'flex-1 min-h-0 border-b border-surface-700/50'
-                : 'flex-1 min-w-0 border-r border-surface-700/50'
-              : 'flex-1 min-h-0'
+                ? 'flex-1 min-h-0 min-w-0 border-b border-surface-700/50'
+                : 'flex-1 min-w-0 min-h-0 border-r border-surface-700/50'
+              : 'flex-1 min-h-0 min-w-0'
           }
         >
           <LiveTerminal
@@ -134,7 +140,7 @@ export default function TerminalBottomPanel({ terminal, selectedTask, onSetSelec
 
         {/* Split pane */}
         {isSplit && (
-          <div className={terminal.splitMode === 'horizontal' ? 'flex-1 min-h-0' : 'flex-1 min-w-0'}>
+          <div className={terminal.splitMode === 'horizontal' ? 'flex-1 min-h-0 min-w-0' : 'flex-1 min-w-0 min-h-0'}>
             <LiveTerminal
               key={`split-${terminal.splitTabId}`}
               task={terminal.splitTab}
