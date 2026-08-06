@@ -229,6 +229,13 @@ pub fn unmet_ancestor_waves(db: &DbPool, task_id: i64) -> Vec<Vec<Task>> {
             waves[depth.get(&id).copied().unwrap_or(0)].push(task);
         }
     }
+    // `closure` is a HashSet, so without this the tasks inside a wave come out in
+    // whatever order the hasher produced — a confirmation prompt that lists the same
+    // work in a different order each time it opens. By id is the order the board
+    // already shows them in.
+    for wave in &mut waves {
+        wave.sort_by_key(|t| t.id);
+    }
     // A task that vanished between the walk and the read leaves a hole, not a gap
     // in the ordering.
     waves.retain(|w| !w.is_empty());
@@ -572,6 +579,31 @@ mod tests {
         // Depth has to be the longest path. Taking the shortest would put d in the
         // same wave as b, and d cannot start until b has finished.
         assert_eq!(wave_ids(&waves), vec![vec![a], vec![b], vec![d]]);
+    }
+
+    #[test]
+    fn tasks_inside_a_wave_come_out_in_board_order() {
+        let db = test_db();
+        // Six leaves rather than two: the closure is a HashSet, and with two members
+        // an unsorted wave lands in the right order half the time by luck.
+        let leaves: Vec<i64> = (0..6)
+            .map(|i| seed_task(&db, &format!("leaf{}", i)))
+            .collect();
+        let target = seed_task(&db, "target");
+        for &leaf in &leaves {
+            add_dependency(&db, target, leaf, None).unwrap();
+        }
+
+        let waves = unmet_ancestor_waves(&db, target);
+
+        // Deliberately not `wave_ids`, which sorts before comparing: the order under
+        // test is the order the confirmation prompt renders, and a sorted comparison
+        // cannot see it. Every other wave assertion here is about membership.
+        let listed: Vec<i64> = waves[0].iter().map(|t| t.id).collect();
+        assert_eq!(
+            listed, leaves,
+            "a wave must list its tasks by id, not in hash order"
+        );
     }
 
     #[test]
