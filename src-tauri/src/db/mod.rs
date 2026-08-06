@@ -3,6 +3,7 @@ pub mod artifact_refs;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;
+pub mod blockers;
 pub mod custom_models;
 pub mod dependencies;
 pub mod model_catalog;

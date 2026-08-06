@@ -243,6 +243,50 @@ pub fn create_tables(conn: &Connection) {
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
             FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
         );
+
+        -- A question an agent stopped to ask, and the answer it got.
+        CREATE TABLE IF NOT EXISTS task_blockers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('single_choice','multi_choice','free_text')),
+            -- Short chip above the question, the way Claude Code heads a prompt.
+            header TEXT DEFAULT '',
+            question TEXT NOT NULL,
+            -- What the agent had established before it got stuck.
+            context TEXT DEFAULT '',
+            -- The document under discussion, when the question is about one.
+            artifact_id INTEGER,
+            status TEXT DEFAULT 'open' CHECK(status IN ('open','answered','cancelled')),
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            answered_at DATETIME,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            -- SET NULL, not CASCADE: deleting the document under discussion must
+            -- not delete the question, which the agent is still waiting on.
+            FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS task_blocker_options (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blocker_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            FOREIGN KEY (blocker_id) REFERENCES task_blockers(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS task_blocker_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blocker_id INTEGER NOT NULL,
+            -- NULL for a free-text answer, or for the escape offered alongside
+            -- options when none of them fit.
+            option_id INTEGER,
+            -- Context the user typed against one chosen option.
+            note TEXT,
+            free_text TEXT,
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (blocker_id) REFERENCES task_blockers(id) ON DELETE CASCADE,
+            FOREIGN KEY (option_id) REFERENCES task_blocker_options(id) ON DELETE CASCADE
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -260,6 +304,16 @@ pub fn create_tables(conn: &Connection) {
         "CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_context_snippets_project ON context_snippets(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_blockers_task ON task_blockers(task_id, status)",
+        // One open blocker per task, enforced rather than assumed. Two open
+        // questions would leave the runner with no single answer to resume on and
+        // the board with no one thing to render.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_blockers_one_open
+            ON task_blockers(task_id) WHERE status = 'open'",
+        "CREATE INDEX IF NOT EXISTS idx_task_blocker_options_blocker
+            ON task_blocker_options(blocker_id, sort_order)",
+        "CREATE INDEX IF NOT EXISTS idx_task_blocker_responses_blocker
+            ON task_blocker_responses(blocker_id)",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_project ON prompt_templates(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_webhooks_project ON webhooks(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_roles_project ON roles(project_id)",
