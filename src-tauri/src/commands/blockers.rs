@@ -4,9 +4,12 @@
 //! waiting. Answer a question inside the wait and the agent picks the answer up
 //! in the session it already has, so the task goes straight back to `in_progress`
 //! and its timer restarts. Answer it after the wait expired and the agent is
-//! gone: the task has to stay `blocked` until something restarts it, because an
-//! `in_progress` task with no runner is reset to backlog by
-//! `recover_orphaned_tasks` on the next launch, taking the answer with it.
+//! gone, so the answer alone reaches nobody: the task is restarted with it,
+//! reusing the worktree the agent left behind.
+//!
+//! A task whose restart fails goes back to `blocked` rather than being left in
+//! `in_progress`, because `recover_orphaned_tasks` resets an `in_progress` task
+//! with no runner to backlog on the next launch, taking the answer with it.
 
 use crate::claude::state_machine::TaskStatus;
 use crate::db::blockers::{Blocker, BlockerResponse};
@@ -18,7 +21,8 @@ use crate::services::blockers as wait;
 pub struct AnswerOutcome {
     /// True when the agent was still waiting and resumed in its own session.
     pub resumed_in_session: bool,
-    /// True when the agent had already stopped and the task needs restarting.
+    /// True when the agent had stopped and restarting it did not work either, so
+    /// the task is still blocked and the user has to start it themselves.
     pub needs_restart: bool,
     /// The answer as one line, the same text the agent is given.
     pub summary: String,
@@ -72,13 +76,73 @@ pub fn answer_blocker(
     app: tauri::AppHandle,
     blocker_id: i64,
     responses: Vec<ResponseInput>,
+    mcp_port: u16,
 ) -> Result<AnswerOutcome, String> {
     let db = db::get_db();
-    let outcome = answer_blocker_in(&db, blocker_id, &responses)?;
-    if let Some(task_id) = db::blockers::get(&db, blocker_id).map(|b| b.task_id) {
+    let mut outcome = answer_blocker_in(&db, blocker_id, &responses)?;
+    let task_id = db::blockers::get(&db, blocker_id).map(|b| b.task_id);
+
+    // The agent gave up before the answer arrived, so nothing is listening. Start
+    // it again with the answer, in the worktree it left behind.
+    if outcome.needs_restart {
+        if let Some(task_id) = task_id {
+            match restart_with_answer(&app, &db, task_id, &outcome.summary, mcp_port) {
+                Ok(()) => outcome.needs_restart = false,
+                Err(e) => {
+                    log::error!("resuming task {} with its answer: {}", task_id, e);
+                    tq::add_log(
+                        &db,
+                        task_id,
+                        &format!("Could not resume with the answer: {}", e),
+                        "error",
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(task_id) = task_id {
         emit_task(&app, &db, task_id);
     }
     Ok(outcome)
+}
+
+/// Put a blocked task back to work with the answer it was waiting for.
+///
+/// The status moves first and is rolled back if the runner refuses, matching
+/// `change_task_status`: an `in_progress` task with nothing running is reset to
+/// backlog on the next launch.
+fn restart_with_answer(
+    app: &tauri::AppHandle,
+    db: &DbPool,
+    task_id: i64,
+    answer: &str,
+    mcp_port: u16,
+) -> Result<(), String> {
+    let task = tq::get_by_id(db, task_id).ok_or("task not found")?;
+    let project = crate::db::projects::get_by_id(db, task.project_id).ok_or("project not found")?;
+
+    tq::update_status(db, task_id, TaskStatus::InProgress.as_str());
+    tq::set_resumed(db, task_id);
+    let updated = tq::get_by_id(db, task_id).ok_or("task not found after the status change")?;
+
+    if crate::claude::runner::resume_with_answer(
+        &updated,
+        app.clone(),
+        &project.working_dir,
+        &project,
+        mcp_port,
+        answer,
+    ) {
+        Ok(())
+    } else {
+        // Already running, or the spawn was refused. Back to blocked, which is the
+        // state a stopped task can sit in safely.
+        tq::update_status(db, task_id, TaskStatus::Blocked.as_str());
+        tq::pause_timer(db, task_id);
+        Err("the runner refused to start".to_string())
+    }
 }
 
 /// Answer a question and let the agent know.

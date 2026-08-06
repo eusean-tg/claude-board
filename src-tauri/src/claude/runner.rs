@@ -241,12 +241,63 @@ fn generate_branch_slug(title: &str) -> String {
 /// Resolve the effective working directory for a task.
 /// If auto_branch is enabled, creates a git worktree for isolation.
 /// Returns (effective_working_dir, Option<branch_name>).
+/// The worktree a task already has, if it still exists on disk.
+///
+/// Checks `TASK_WORKTREES` first and the conventional path second. The map only
+/// knows about worktrees created since the process started, so it is empty after
+/// a restart — and a task blocked overnight is answered in a different process
+/// from the one that created its worktree.
+fn existing_task_worktree(task_id: i64, working_dir: &str) -> Option<String> {
+    if let Some(dir) = TASK_WORKTREES.lock().get(&task_id).cloned() {
+        if Path::new(&dir).exists() {
+            return Some(dir);
+        }
+    }
+    let conventional = Path::new(working_dir)
+        .join(".worktrees")
+        .join(format!("task-{}", task_id));
+    if conventional.exists() {
+        let dir = conventional.to_string_lossy().to_string();
+        // Re-register it so cleanup can find it later in this process.
+        TASK_WORKTREES.lock().insert(task_id, dir.clone());
+        return Some(dir);
+    }
+    None
+}
+
+/// Where a resumed agent should run.
+///
+/// The task's existing worktree when it still has one, otherwise the project's
+/// working directory. Never creates and never removes: a resume exists to
+/// continue work that is already there, and `ensure_task_worktree` would delete
+/// the worktree to build a clean one.
+pub(crate) fn resolve_resume_dir(task_id: i64, working_dir: &str) -> String {
+    existing_task_worktree(task_id, working_dir).unwrap_or_else(|| working_dir.to_string())
+}
+
+/// The prompt a resumed agent gets: its answer, then the task as first given.
+///
+/// The answer goes first and the original follows, because a resumed session may
+/// have lost the thread and a fresh one never had it — either way the agent needs
+/// to know what it asked about before it re-reads the task.
+pub(crate) fn build_resume_prompt(answer: &str, original: &str) -> String {
+    format!(
+        "You asked a question and stopped. The user has answered:\n\n\
+         {}\n\n\
+         Continue the task using that answer. Your earlier work is still in this \
+         working directory — do not start over, and do not revert anything.\n\n\
+         ---\n\n\
+         {}",
+        answer.trim(),
+        original
+    )
+}
+
 fn ensure_task_worktree(
     task: &tasks::Task,
     working_dir: &str,
     project: &projects::Project,
     db: &DbPool,
-    _app: &AppHandle,
 ) -> (String, Option<String>) {
     if project.auto_branch.unwrap_or(1) == 0 {
         return (working_dir.to_string(), None);
@@ -290,14 +341,17 @@ fn ensure_task_worktree(
     }));
     let base = project.pr_base_branch.as_deref().unwrap_or("main");
 
-    // For revisions, reuse existing worktree
+    // For revisions, reuse existing worktree.
+    //
+    // The filesystem is consulted when the in-memory map comes up empty, which is
+    // what happens after a restart: TASK_WORKTREES is only populated by worktrees
+    // this process created. Without the fallback a revision requested after a
+    // restart drops through to the branch below, which removes the worktree —
+    // taking any uncommitted work with it.
     if is_revision {
-        let existing = TASK_WORKTREES.lock().get(&task.id).cloned();
-        if let Some(wt_dir) = existing {
-            if Path::new(&wt_dir).exists() {
-                tasks::update_branch(db, task.id, &branch_name);
-                return (wt_dir, Some(branch_name));
-            }
+        if let Some(wt_dir) = existing_task_worktree(task.id, working_dir) {
+            tasks::update_branch(db, task.id, &branch_name);
+            return (wt_dir, Some(branch_name));
         }
     }
 
@@ -1180,6 +1234,7 @@ fn copy_task_attachments(
 }
 
 /// Build Claude CLI arguments from task configuration.
+#[allow(clippy::too_many_arguments)]
 fn build_claude_args(
     prompt: &str,
     model: &str,
@@ -1187,6 +1242,7 @@ fn build_claude_args(
     permission_mode: &str,
     allowed_tools: &str,
     mcp_server_port: u16,
+    resume_session: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
@@ -1197,6 +1253,12 @@ fn build_claude_args(
         "--model".to_string(),
         model.to_string(),
     ];
+
+    // Only ever with a value. `--resume` on its own opens an interactive picker,
+    // which would hang a run that has no terminal attached to it.
+    if let Some(id) = resume_session.map(str::trim).filter(|s| !s.is_empty()) {
+        args.extend(["--resume".to_string(), id.to_string()]);
+    }
 
     // MCP config — sidecar lives under the bundled resources/ dir alongside the
     // executable. Tauri places it at <exe-dir>/resources/mcp-server.js for both
@@ -1609,6 +1671,41 @@ pub fn start(
     project: &projects::Project,
     mcp_server_port: u16,
 ) -> bool {
+    start_inner(task, app, working_dir, project, mcp_server_port, None)
+}
+
+/// Restart a blocked task's agent with the answer it was waiting for.
+///
+/// Taken when the question was answered after the agent's wait expired, so the
+/// agent is gone but its commits and its uncommitted files are not. The existing
+/// worktree is reused, never rebuilt, and the stored `claude_session_id` is passed
+/// to `--resume` so the agent picks up its own context where it can.
+pub fn resume_with_answer(
+    task: &tasks::Task,
+    app: AppHandle,
+    working_dir: &str,
+    project: &projects::Project,
+    mcp_server_port: u16,
+    answer: &str,
+) -> bool {
+    start_inner(
+        task,
+        app,
+        working_dir,
+        project,
+        mcp_server_port,
+        Some(answer),
+    )
+}
+
+fn start_inner(
+    task: &tasks::Task,
+    app: AppHandle,
+    working_dir: &str,
+    project: &projects::Project,
+    mcp_server_port: u16,
+    resume_answer: Option<&str>,
+) -> bool {
     let task_id = task.id;
     let db = db::get_db();
 
@@ -1652,7 +1749,18 @@ pub fn start(
 
     // Create isolated worktree (or just branch) BEFORE building prompt so branch name is included in instructions
     let mut task_clone = task.clone();
-    let (effective_dir, branch_opt) = ensure_task_worktree(task, working_dir, project, &db, &app);
+    let (effective_dir, branch_opt) = if resume_answer.is_some() {
+        // A resume continues work that is already on disk. ensure_task_worktree
+        // would remove the worktree and build a clean one whenever its in-memory
+        // record is missing, which is always the case after a restart — and a
+        // task blocked overnight is answered in a different process.
+        (
+            resolve_resume_dir(task_id, working_dir),
+            task.branch_name.clone(),
+        )
+    } else {
+        ensure_task_worktree(task, working_dir, project, &db)
+    };
     if let Some(branch) = branch_opt {
         task_clone.branch_name = Some(branch);
     }
@@ -1701,6 +1809,10 @@ pub fn start(
         template.as_ref(),
         Some(project),
     );
+    let prompt = match resume_answer {
+        Some(answer) => build_resume_prompt(answer, &prompt),
+        None => prompt,
+    };
     let model = task.model.as_deref().unwrap_or("sonnet");
     let effort = task.thinking_effort.as_deref().unwrap_or("medium");
     let permission_mode = project.permission_mode.as_deref().unwrap_or("auto-accept");
@@ -1762,7 +1874,10 @@ pub fn start(
         None,
     );
 
-    // Build CLI arguments
+    // Build CLI arguments. A resume passes the stored session id when there is
+    // one; sessions expire, and Claude falling back to a fresh one is recoverable
+    // because the answer and the original task are both in the prompt.
+    let resume_session = resume_answer.and(task.claude_session_id.as_deref());
     let args = build_claude_args(
         &prompt,
         model,
@@ -1770,6 +1885,7 @@ pub fn start(
         permission_mode,
         allowed_tools,
         mcp_server_port,
+        resume_session,
     );
 
     let project_working_dir = working_dir.to_string();
@@ -1986,9 +2102,13 @@ After all checks, you MUST output this exact JSON block as your final output:
         permission_mode,
         allowed_tools,
         mcp_server_port,
+        // The auto-test is a fresh look at the finished work, not a continuation
+        // of the session that produced it.
+        None,
     );
-    // Reuse the task's worktree if one exists, otherwise fall back to project working dir
-    let effective_dir = get_task_worktree(task_id).unwrap_or_else(|| working_dir.to_string());
+    // Reuse the task's worktree if one exists, otherwise fall back to project
+    // working dir. Filesystem-backed, so a test after a restart still finds it.
+    let effective_dir = resolve_resume_dir(task_id, working_dir);
     let project_working_dir = working_dir.to_string();
     let project_id = task.project_id;
     let task_title = task.title.clone();
@@ -2591,6 +2711,159 @@ mod tests {
         git(&["add", "."], root);
         assert!(git(&["commit", "--quiet", "-m", "work"], root));
         git(&["checkout", "--quiet", "main"], root);
+    }
+
+    /// A task worktree at the conventional path, holding one uncommitted file.
+    fn seed_task_worktree(root: &Path, task_id: i64) -> PathBuf {
+        let wt = root.join(".worktrees").join(format!("task-{}", task_id));
+        assert!(git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("feature/task-{}", task_id),
+                &wt.to_string_lossy(),
+                "main",
+            ],
+            root,
+        ));
+        wt
+    }
+
+    #[test]
+    fn resuming_reuses_the_existing_worktree() {
+        // The whole point: the agent's uncommitted work must survive the resume.
+        let root = repo("resume-worktree");
+        let wt = seed_task_worktree(&root, 42);
+        std::fs::write(wt.join("in-flight.txt"), "unfinished work\n").unwrap();
+
+        let dir = resolve_resume_dir(42, &root.to_string_lossy());
+
+        assert_eq!(dir, wt.to_string_lossy());
+        assert!(wt.join("in-flight.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_worktree_is_found_after_a_restart_loses_the_in_memory_record() {
+        // TASK_WORKTREES only knows what this process created, so it is empty
+        // after a restart — and a task blocked overnight is answered by a
+        // different process from the one that made its worktree.
+        let root = repo("resume-after-restart");
+        let wt = seed_task_worktree(&root, 43);
+        TASK_WORKTREES.lock().remove(&43);
+
+        let dir = resolve_resume_dir(43, &root.to_string_lossy());
+
+        assert_eq!(dir, wt.to_string_lossy());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn test_db() -> DbPool {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::schema::create_tables(&conn);
+        crate::db::schema::run_migrations(&conn);
+        std::sync::Arc::new(Mutex::new(conn))
+    }
+
+    /// Both types derive Deserialize, and serde leaves absent `Option` fields as
+    /// `None`, so only the required columns need naming.
+    fn task_json(id: i64, revisions: i64) -> tasks::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project_id": 1, "title": "Add auth",
+            "revision_count": revisions,
+        }))
+        .unwrap()
+    }
+
+    fn project_json(base: &str) -> projects::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "B", "slug": "b", "working_dir": "/repo",
+            "auto_branch": 1, "pr_base_branch": base,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_revision_after_a_restart_keeps_its_worktree_and_its_uncommitted_work() {
+        // This is the data-loss path. TASK_WORKTREES only records worktrees this
+        // process created, so after a restart the revision branch used to fall
+        // through to the code below it, which runs `git worktree remove --force`
+        // and then deletes the directory outright.
+        let root = repo("revision-after-restart");
+        let wt = seed_task_worktree(&root, 46);
+        std::fs::write(wt.join("in-flight.txt"), "unfinished work\n").unwrap();
+        TASK_WORKTREES.lock().remove(&46);
+        let db = test_db();
+
+        let (dir, branch) = ensure_task_worktree(
+            &task_json(46, 1),
+            &root.to_string_lossy(),
+            &project_json("main"),
+            &db,
+        );
+
+        assert_eq!(dir, wt.to_string_lossy(), "the worktree must be reused");
+        assert!(
+            wt.join("in-flight.txt").exists(),
+            "uncommitted work must survive a revision"
+        );
+        assert!(branch.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_first_run_still_gets_a_fresh_worktree() {
+        // The reuse fallback must not change what a task with no revisions does.
+        let root = repo("first-run-worktree");
+        let db = test_db();
+
+        let (dir, branch) = ensure_task_worktree(
+            &task_json(47, 0),
+            &root.to_string_lossy(),
+            &project_json("main"),
+            &db,
+        );
+
+        assert!(dir.contains("task-47"), "got {dir}");
+        assert_eq!(branch.as_deref(), Some("feature/add-auth"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resuming_a_task_with_no_worktree_falls_back_to_the_working_dir() {
+        let root = repo("resume-no-worktree");
+        let dir = root.to_string_lossy().to_string();
+
+        // Projects with auto_branch off never get one, and a resume must still run.
+        assert_eq!(resolve_resume_dir(44, &dir), dir);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_answer_is_injected_into_the_resumed_prompt() {
+        let prompt = build_resume_prompt("Use PKCE, and skip the implicit flow", "original task");
+
+        assert!(prompt.contains("PKCE"));
+        assert!(prompt.contains("original task"));
+        // A resumed agent that starts over throws away the work this whole
+        // feature exists to keep.
+        assert!(prompt.contains("do not start over"));
+    }
+
+    #[test]
+    fn the_resume_flag_is_only_passed_with_a_session_id() {
+        let base = |resume| build_claude_args("p", "sonnet", "medium", "default", "", 4000, resume);
+
+        let with = base(Some("fac5d07c-c156-4a1a-a52d-916f91b8e8a9"));
+        let pos = with.iter().position(|a| a == "--resume").expect("--resume");
+        assert_eq!(with[pos + 1], "fac5d07c-c156-4a1a-a52d-916f91b8e8a9");
+
+        // Bare --resume opens an interactive picker, which would hang a run with
+        // no terminal attached.
+        assert!(!base(None).contains(&"--resume".to_string()));
+        assert!(!base(Some("")).contains(&"--resume".to_string()));
+        assert!(!base(Some("   ")).contains(&"--resume".to_string()));
     }
 
     #[test]
