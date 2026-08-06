@@ -162,16 +162,14 @@ export default function Board({
   }, [filteredTasks]);
   const columnTasks = (colId) => groupedTasks[colId] || [];
 
-  const visibleColumns = useMemo(() => {
-    return COLUMNS.filter((col) => {
-      // Approval is opt-in per project, so its column only appears when asked for.
-      if (col.id === 'awaiting_approval') return !!project?.require_approval;
-      // Blocked is never opt-in — any agent can raise a question — but an
-      // always-empty column is clutter, so it appears once something is in it.
-      if (col.id === 'blocked') return groupedTasks.blocked?.length > 0;
-      return true;
-    });
-  }, [project?.require_approval, groupedTasks.blocked?.length]);
+  // Approval is the only conditional column, because it is the only one a project
+  // opts into. Blocked applies to every project — any agent can stop and ask — so
+  // it is always shown, the way Failed is: a lane that appears only once it has
+  // something in it is a lane nobody knows exists until it surprises them.
+  const visibleColumns = useMemo(
+    () => COLUMNS.filter((col) => col.id !== 'awaiting_approval' || !!project?.require_approval),
+    [project?.require_approval],
+  );
 
   return (
     <div className="h-full flex">

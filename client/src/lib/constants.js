@@ -2,6 +2,9 @@
 export const COLUMNS = [
   { id: 'backlog', label: 'Backlog', color: 'text-surface-400', bg: 'bg-surface-400', dot: 'bg-surface-400' },
   { id: 'in_progress', label: 'In Progress', color: 'text-amber-400', bg: 'bg-amber-400', dot: 'bg-amber-400' },
+  // Directly after In Progress: blocked is a pause at that stage, not a stage of
+  // its own further along. This order is also the sort rank in the list view.
+  { id: 'blocked', label: 'Blocked', color: 'text-orange-400', bg: 'bg-orange-400', dot: 'bg-orange-400' },
   { id: 'testing', label: 'Testing', color: 'text-claude', bg: 'bg-claude', dot: 'bg-claude' },
   { id: 'done', label: 'Done', color: 'text-emerald-400', bg: 'bg-emerald-400', dot: 'bg-emerald-400' },
   { id: 'failed', label: 'Failed', color: 'text-red-400', bg: 'bg-red-400', dot: 'bg-red-400' },
@@ -12,7 +15,6 @@ export const COLUMNS = [
     bg: 'bg-violet-400',
     dot: 'bg-violet-400',
   },
-  { id: 'blocked', label: 'Blocked', color: 'text-orange-400', bg: 'bg-orange-400', dot: 'bg-orange-400' },
 ];
 
 // Mirrors TaskStatus in src-tauri/src/claude/state_machine.rs. Group and switch on

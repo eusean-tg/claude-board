@@ -32,6 +32,13 @@ describe('task status lists', () => {
     }
   });
 
+  it('puts blocked directly after in_progress, which is also the list sort rank', () => {
+    const ids = COLUMNS.map((c) => c.id);
+    // A pause at the in_progress stage, not a stage further along. Rendering it
+    // after Failed reads as a late state and is easy to miss.
+    expect(ids[ids.indexOf('in_progress') + 1]).toBe('blocked');
+  });
+
   it('gives every status a text colour', () => {
     for (const id of TASK_STATUSES) {
       expect(STATUS_COLORS[id], `missing STATUS_COLORS.${id}`).toBeTruthy();
