@@ -218,6 +218,17 @@
   border-left: 1px solid #3d372e !important;
 }
 
+/* The artifact reading pane. Transparent so the document sits on the same surface
+   as everything around it; the library hard-codes a background on .wmde-markdown
+   with !important, which is why this needs the same weight rather than an inline
+   style. */
+.md-artifact-body .wmde-markdown {
+  background-color: transparent !important;
+  color: #d4cbbe !important;
+  font-size: 12px !important;
+  line-height: 1.6 !important;
+}
+
 /* Rendered markdown must stay inside its pane.
    Prose wraps, including long unbroken strings — a URL or an absolute path has no
    space to break at, and `word-wrap` alone leaves it sticking out of the column.

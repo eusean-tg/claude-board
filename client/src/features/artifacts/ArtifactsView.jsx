@@ -494,16 +494,11 @@ export default function ArtifactsView({ projectId, project, tasks, onViewDetail 
                     style={{ backgroundColor: 'transparent', height: '100%' }}
                   />
                 ) : (
-                  <div className="px-4 py-3">
-                    <MDEditor.Markdown
-                      source={content}
-                      style={{
-                        backgroundColor: 'transparent',
-                        color: '#a8a29e',
-                        fontSize: '12px',
-                        lineHeight: '1.6',
-                      }}
-                    />
+                  <div className="md-artifact-body px-4 py-3">
+                    {/* Styling lives in the class, not an inline style: the library
+                        sets .wmde-markdown's background with !important, which an
+                        inline declaration cannot override. */}
+                    <MDEditor.Markdown source={content} />
                   </div>
                 )}
               </div>
