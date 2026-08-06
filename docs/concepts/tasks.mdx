@@ -15,6 +15,9 @@ Tasks are the core unit of work in Claude Board. Each task represents a job for 
   <Step title="In Progress" icon="play">
     A Claude agent spawns and begins working. The live terminal streams output in real-time. The smart timer tracks active coding time.
   </Step>
+  <Step title="Blocked" icon="circle-question">
+    Only when the agent stops to ask a question it cannot proceed without. The timer pauses. Answer it and the task continues — in the same session when the agent is still waiting. See [Blockers](/features/blockers).
+  </Step>
   <Step title="Testing" icon="flask">
     Claude has finished. The timer pauses. Review the changes — approve to mark done, or request changes to send Claude back to work.
   </Step>

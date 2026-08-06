@@ -1,0 +1,113 @@
+---
+title: "Blockers"
+description: "An agent that cannot proceed stops and asks you a question instead of guessing"
+icon: "circle-question"
+---
+
+An agent working alone has to resolve every ambiguity itself, and a wrong guess costs a whole run. A **blocker** is the alternative: the agent stops, asks the question, and waits. The task moves to **Blocked**, you answer on the board, and the agent carries on from where it stopped.
+
+## What an agent asks about
+
+The prompt for every task tells the agent to raise a blocker when it cannot proceed without a decision only you can make:
+
+- A requirement that reads two ways, where the two readings mean different work
+- A choice between approaches with real trade-offs — which auth flow, which storage, which library
+- A missing credential, endpoint or account
+- Work that reaches outside the task as described
+
+It also tells the agent that decisions it can reasonably make are its own, and not to ask for confirmation of work already done. A blocker on every small decision would be worse than none, because you would stop reading them.
+
+## Answering
+
+A blocked task shows a **Waiting for your answer** marker on its card, and a notification fires carrying the question itself, so you can decide from the banner whether to go and answer now. Open the task and the question sits above the tabs, with the context the agent gathered before it got stuck.
+
+Three shapes, chosen by the agent to fit the question:
+
+<Tabs>
+  <Tab title="One of several">
+    Radio buttons. Pick one option and send.
+  </Tab>
+  <Tab title="Several together">
+    Checkboxes. Each option you check reveals a box for context that applies to that choice alone — "the read path, but only the cached reads".
+  </Tab>
+  <Tab title="Free text">
+    A text box. Used when the agent cannot enumerate the answers.
+  </Tab>
+</Tabs>
+
+Every question with options also offers **Something else** with a text box. The options are the agent's guess at the answer space, and a question with no escape forces a wrong answer.
+
+An empty answer is refused. Resuming an agent with nothing to act on is worse than leaving the task blocked.
+
+## Answered quickly, or answered later
+
+Both paths keep the work. They differ in what happens to the agent.
+
+<Steps>
+  <Step title="Answered while the agent waits" icon="bolt">
+    The answer returns into the tool call the agent is still holding open, and it continues in the same session with all of its context. The task returns to **In Progress** and its timer restarts. Nothing is restarted and nothing is re-read.
+  </Step>
+  <Step title="Answered after the wait expires" icon="clock">
+    The agent is told to stop cleanly and leave its changes in place. The task stays **Blocked**. When you answer, the agent is started again in the same worktree, with the answer and the original task in its prompt, resuming its stored session where that session is still available.
+  </Step>
+</Steps>
+
+The wait is five minutes unless the agent asks for a different one, and it is capped at thirty. An agent parked forever on a question nobody has seen is worse than one that stopped cleanly.
+
+### The timer pauses
+
+A blocked task's work timer stops, and restarts when the task does. Waiting for a person is not work: counted as work it inflates the task's duration and can trip [Task Timeout](/features/task-timeout) into killing a task that is only waiting.
+
+## One question at a time
+
+A task has at most one open blocker. Two open questions would leave no single answer to resume on, and no one thing to render. An agent that asks again before its first question is answered is refused.
+
+## Ways out
+
+A blocker never wedges a task permanently.
+
+| Action | Effect |
+|---|---|
+| **Answer** | The task continues, in the same session or a new one |
+| **Dismiss** | Closes the question unanswered. The agent stops now rather than waiting out its deadline; the task stays Blocked |
+| **Move the task** | Blocked → In Progress, Backlog or Failed. Any open question closes with the move |
+
+Blocked cannot go straight to Testing or Done. The question is unanswered, and moving past it would skip the answer entirely.
+
+## Chat about this
+
+Answering a question is not always what you want. Sometimes the approach itself needs to change — which is what the **Discussion** tab on every task is for.
+
+Writing in it changes nothing about the work. No worktree, no branch, no running process, no status change. You can think out loud, add a constraint, or argue with what the agent decided, at no cost.
+
+**Send Claude back in** is the separate, deliberate step. It restarts the task with the conversation as context, in the worktree the agent was already using, so everything done before the discussion survives. Where the discussion contradicts what the agent decided earlier, the discussion wins.
+
+<Note>
+A discussion is not a revision. Requesting changes bumps a task's revision count, which feeds `max_auto_revisions` and can fail a task for needing too many attempts. Talking about the approach leaves those counters alone.
+</Note>
+
+## Notifications
+
+**Question Waiting** is on by default, unlike Task Started. A question nobody sees stalls the task until its wait expires. Turn it off in [App Settings](/features/settings) alongside the other notification toggles.
+
+## For agents
+
+The tool is `raise_blocker`, over the same MCP channel as the rest of Claude Board's tools:
+
+```
+raise_blocker(
+  taskId: 42,
+  kind: "single_choice",
+  header: "Auth flow",
+  question: "Which auth flow should the client use?",
+  context: "The router already assumes a redirect.",
+  options: [
+    { label: "PKCE", description: "recommended for public clients" },
+    { label: "Implicit" }
+  ]
+)
+```
+
+`header` and `context` are optional; `options` is required for both choice kinds. Pass `artifactId` to point the question at a stored [artifact](/features/artifacts) rather than pasting a path into the context.
+
+The call returns the answer when one arrives, or an instruction to stop cleanly when the wait expires.

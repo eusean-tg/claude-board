@@ -17,6 +17,7 @@ Each event type can be independently enabled or disabled in [App Settings](/feat
 | **Task Started** | Off | Claude started working on a task |
 | **Revision Requested** | On | Revision feedback was sent to Claude |
 | **Queue Auto-Started** | Off | A task was automatically started from the queue |
+| **Question Waiting** | On | An agent raised a [blocker](/features/blockers) and is waiting on an answer |
 
 Auto-test results also trigger notifications:
 - **Test Passed** uses the Task Completed toggle
@@ -32,6 +33,14 @@ Claude Board — Task Completed
 ✔ Completed — ready for review
 ```
 
+A **Question Waiting** notification carries the agent's question in place of a fixed line, so the banner alone is enough to decide whether to go and answer:
+
+```
+Claude Board — Question Waiting
+[FTR-CB-1042] Implement login page
+❓ Which auth flow should the client use?
+```
+
 ### Event Icons
 
 Each event type uses a distinctive symbol:
@@ -43,6 +52,7 @@ Each event type uses a distinctive symbol:
 | Failed | ✘ |
 | Revision | ↻ |
 | Queue | ⏵ |
+| Question | ❓ |
 
 ## Localization
 

@@ -68,6 +68,7 @@
                   "features/queue",
                   "features/circuit-breaker",
                   "features/approval-gates",
+                  "features/blockers",
                   "features/workflow-templates",
                   "features/planning-mode",
                   "features/roadmap",
