@@ -20,6 +20,10 @@ Task dependencies define execution order and enable advanced orchestration patte
   </Step>
 </Steps>
 
+## Running a chain
+
+Dependencies define order; [Dependency-Ordered Runs](/features/dependency-runs) is what acts on it. Starting a task whose dependencies have not finished is refused, and Claude Board offers to run the prerequisites first — on a shared branch, so each task builds on the last.
+
 ## Conditional Dependencies
 
 Dependencies can have conditions that control when child tasks are triggered:
