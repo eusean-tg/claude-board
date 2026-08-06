@@ -114,14 +114,38 @@ pub fn startup_recovery(app: &AppHandle) {
 
 /// Try to start the next queued task(s) respecting concurrency and DAG dependencies.
 pub fn start_next_queued(db: &DbPool, app: &AppHandle, project_id: i64) {
+    let auto_queue = projects::get_by_id(db, project_id)
+        .and_then(|p| p.auto_queue)
+        .unwrap_or(0);
+    if auto_queue == 0 {
+        return;
+    }
+    start_ready(db, app, project_id, None);
+}
+
+/// Start the ready tasks of one group, whatever the project's auto-queue setting is.
+///
+/// A chain the user explicitly asked to run has to reach the end on its own.
+/// `auto_queue` governs whether the app starts work nobody asked for; it is off by
+/// default, so routing a group through `start_next_queued` would leave the tasks
+/// sitting in Backlog with nothing to explain why.
+///
+/// Scoped to the group's members so enabling nothing else: unrelated ready tasks
+/// stay where they are.
+pub fn start_group_members(db: &DbPool, app: &AppHandle, project_id: i64, group_id: i64) {
+    start_ready(db, app, project_id, Some(group_id));
+}
+
+/// Start as many ready tasks as the concurrency limit allows.
+///
+/// With `only_group`, considers just that group's members.
+fn start_ready(db: &DbPool, app: &AppHandle, project_id: i64, only_group: Option<i64>) {
     let project = match projects::get_by_id(db, project_id) {
         Some(p) => p,
         None => return,
     };
-    if project.auto_queue.unwrap_or(0) == 0 {
-        return;
-    }
-    // Circuit breaker: block queue if active
+    // The circuit breaker is a safety mechanism rather than a preference, so it
+    // applies to an explicitly requested group too.
     if project.circuit_breaker_active.unwrap_or(0) == 1 {
         return;
     }
@@ -143,6 +167,16 @@ pub fn start_next_queued(db: &DbPool, app: &AppHandle, project_id: i64) {
 
     // Get backlog tasks with ALL dependencies met (DAG-aware)
     let ready = dependencies::get_ready_tasks(db, project_id);
+    let ready: Vec<_> = match only_group {
+        Some(group_id) => {
+            let members = crate::db::task_groups::members(db, group_id);
+            ready
+                .into_iter()
+                .filter(|t| members.contains(&t.id))
+                .collect()
+        }
+        None => ready,
+    };
 
     let mut started = 0;
     let mcp_port = config::load_from_handle(app).port;
@@ -273,6 +307,11 @@ pub fn on_task_completed(db: &DbPool, app: &AppHandle, project_id: i64, task_id:
     }
     // Reset circuit breaker counter on success
     projects::reset_consecutive_failures(db, project_id);
+    // A grouped task finishing unblocks its siblings, and the group must keep going
+    // whether or not the project has auto-queue on.
+    if let Some(group) = crate::db::task_groups::for_task(db, task_id) {
+        start_group_members(db, app, project_id, group.id);
+    }
     start_next_queued(db, app, project_id);
 }
 

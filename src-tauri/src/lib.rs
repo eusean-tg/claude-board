@@ -348,6 +348,8 @@ pub fn run() {
             commands::tasks::create_task,
             commands::tasks::update_task,
             commands::tasks::change_task_status,
+            commands::tasks::start_task_with_prerequisites,
+            commands::tasks::plan_prerequisites,
             commands::tasks::delete_task,
             commands::tasks::get_task_logs,
             commands::tasks::stop_task,

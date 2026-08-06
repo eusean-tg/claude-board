@@ -14,6 +14,55 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+use crate::db::DbPool;
+
+/// Every task that has to run for `task_id` to finish, leaves first, with the
+/// target itself as the final wave.
+///
+/// The shape the confirmation modal renders: each wave is a set that can run
+/// together, and the last one is always the task the user clicked.
+pub fn plan_prerequisites(db: &DbPool, task_id: i64) -> Vec<Vec<tasks::Task>> {
+    let mut waves = crate::db::dependencies::unmet_ancestor_waves(db, task_id);
+    if let Some(target) = tasks::get_by_id(db, task_id) {
+        waves.push(vec![target]);
+    }
+    waves
+}
+
+/// Members already claimed by a live group.
+///
+/// Reported rather than stolen: a task with two trunks has no correct merge target,
+/// and silently moving it would strand the other group's landing.
+pub fn claimed_members(db: &DbPool, member_ids: &[i64]) -> Vec<i64> {
+    member_ids
+        .iter()
+        .copied()
+        .filter(|id| crate::db::task_groups::for_task(db, *id).is_some())
+        .collect()
+}
+
+/// Put each member into a state the queue can pick up, without disturbing any that
+/// are already progressing.
+///
+/// Only a failed member is reset, because it has to run again for the chain to
+/// proceed and only a backlog task is ever started. Everything else is left exactly
+/// as it is: resetting a running task abandons its agent, a blocked one discards an
+/// unanswered question, and one awaiting approval throws away work waiting for
+/// review — none of which the queue could put back.
+pub fn prepare_members(db: &DbPool, member_ids: &[i64]) {
+    for id in member_ids {
+        let status = tasks::get_by_id(db, *id).and_then(|t| t.status);
+        if status.as_deref() == Some(crate::claude::state_machine::TaskStatus::Failed.as_str()) {
+            tasks::update_status(
+                db,
+                *id,
+                crate::claude::state_machine::TaskStatus::Backlog.as_str(),
+            );
+            tasks::reset_retry_count(db, *id);
+        }
+    }
+}
+
 /// Run a git command, reporting only whether it succeeded.
 fn git_ok(working_dir: &str, args: &[&str]) -> bool {
     let mut cmd = crate::child_env::command("git");
@@ -69,7 +118,10 @@ pub fn create_trunk_branch(working_dir: &str, trunk: &str, base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use rusqlite::params;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     fn git(args: &[&str], dir: &Path) -> bool {
         let mut cmd = crate::child_env::command("git");
@@ -113,6 +165,123 @@ mod tests {
             "id": id, "project_id": 1, "title": title, "task_type": task_type,
         }))
         .unwrap()
+    }
+
+    fn test_db() -> crate::db::DbPool {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        crate::db::schema::create_tables(&conn);
+        crate::db::schema::run_migrations(&conn);
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id,name,slug,working_dir) VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn seed(db: &crate::db::DbPool, title: &str, status: &str) -> i64 {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO tasks (project_id,title,status) VALUES (1,?1,?2)",
+            params![title, status],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn status_of(db: &crate::db::DbPool, id: i64) -> String {
+        db.lock()
+            .query_row("SELECT status FROM tasks WHERE id=?1", params![id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    fn wave_ids(waves: &[Vec<tasks::Task>]) -> Vec<Vec<i64>> {
+        waves
+            .iter()
+            .map(|w| {
+                let mut ids: Vec<i64> = w.iter().map(|t| t.id).collect();
+                ids.sort();
+                ids
+            })
+            .collect()
+    }
+
+    #[test]
+    fn planning_appends_the_target_as_the_final_wave() {
+        let db = test_db();
+        let a = seed(&db, "a", "backlog");
+        let b = seed(&db, "b", "backlog");
+        crate::db::dependencies::add_dependency(&db, b, a, None).unwrap();
+
+        let waves = plan_prerequisites(&db, b);
+
+        assert_eq!(wave_ids(&waves), vec![vec![a], vec![b]]);
+    }
+
+    #[test]
+    fn a_ready_task_plans_to_just_itself() {
+        let db = test_db();
+        let a = seed(&db, "a", "backlog");
+
+        assert_eq!(wave_ids(&plan_prerequisites(&db, a)), vec![vec![a]]);
+    }
+
+    #[test]
+    fn a_failed_prerequisite_is_reset_so_the_queue_will_retry_it() {
+        let db = test_db();
+        let a = seed(&db, "a", "failed");
+        let b = seed(&db, "b", "backlog");
+        crate::db::dependencies::add_dependency(&db, b, a, None).unwrap();
+
+        prepare_members(&db, &[a, b]);
+
+        // A failed prerequisite has to run again for the chain to proceed, and only
+        // a backlog task is ever picked up.
+        assert_eq!(status_of(&db, a), "backlog");
+    }
+
+    #[test]
+    fn preparing_members_never_disturbs_work_in_flight() {
+        let db = test_db();
+        let running = seed(&db, "running", "in_progress");
+        let asking = seed(&db, "asking", "blocked");
+        let reviewing = seed(&db, "reviewing", "awaiting_approval");
+        let target = seed(&db, "target", "backlog");
+
+        prepare_members(&db, &[running, asking, reviewing, target]);
+
+        // The plan reset every member to backlog. That would abandon a running
+        // agent, discard an unanswered question, and throw away work waiting for
+        // review — none of which the queue could recover.
+        assert_eq!(status_of(&db, running), "in_progress");
+        assert_eq!(status_of(&db, asking), "blocked");
+        assert_eq!(status_of(&db, reviewing), "awaiting_approval");
+        assert_eq!(status_of(&db, target), "backlog");
+    }
+
+    #[test]
+    fn a_member_already_in_another_group_is_reported_rather_than_stolen() {
+        let db = test_db();
+        let shared = seed(&db, "shared", "backlog");
+        let target = seed(&db, "target", "backlog");
+        crate::db::dependencies::add_dependency(&db, target, shared, None).unwrap();
+        crate::db::task_groups::create(&db, 1, "trunk/other", "main", shared, &[shared]).unwrap();
+
+        let err = claimed_members(&db, &[shared, target]);
+
+        assert!(!err.is_empty());
+        assert!(err.contains(&shared));
+    }
+
+    #[test]
+    fn nothing_is_claimed_when_every_member_is_free() {
+        let db = test_db();
+        let a = seed(&db, "a", "backlog");
+
+        assert!(claimed_members(&db, &[a]).is_empty());
     }
 
     #[test]

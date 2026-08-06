@@ -189,6 +189,75 @@ fn guard_dependencies(db: &db::DbPool, task_id: i64) -> Result<(), String> {
     ))
 }
 
+/// Run a task by running everything it depends on first.
+///
+/// The way forward from the refusal `change_task_status` gives a task with unmet
+/// prerequisites. Creates a group over the target's unmet ancestor closure, cuts a
+/// trunk branch for it, and starts the members that are ready. Each completion
+/// carries the chain forward.
+///
+/// A single ready task gets no group: one branch off the base is already correct,
+/// and a trunk plus two merges to land one task is ceremony with two extra chances
+/// to conflict.
+#[tauri::command]
+pub fn start_task_with_prerequisites(
+    app: AppHandle,
+    id: i64,
+    mcp_port: u16,
+) -> Result<serde_json::Value, String> {
+    use crate::services::orchestration;
+    let db = db::get_db();
+    let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let project = pq::get_by_id(&db, task.project_id).ok_or("Project not found")?;
+
+    let waves = orchestration::plan_prerequisites(&db, id);
+    let member_ids: Vec<i64> = waves.iter().flatten().map(|t| t.id).collect();
+
+    if member_ids.len() <= 1 {
+        let started = change_task_status(app, id, "in_progress".into(), mcp_port)?;
+        return Ok(serde_json::json!({
+            "groupId": null,
+            "queued": [started.id],
+            "trunkBranch": null,
+        }));
+    }
+
+    let claimed = orchestration::claimed_members(&db, &member_ids);
+    if !claimed.is_empty() {
+        return Err(format!(
+            "{} of these tasks already belong to another run",
+            claimed.len()
+        ));
+    }
+
+    let trunk = orchestration::trunk_branch_name(&task);
+    let base = project
+        .pr_base_branch
+        .clone()
+        .unwrap_or_else(|| "main".into());
+    orchestration::create_trunk_branch(&project.working_dir, &trunk, &base)?;
+
+    let group_id = db::task_groups::create(&db, task.project_id, &trunk, &base, id, &member_ids)
+        .map_err(|e| e.to_string())?;
+
+    orchestration::prepare_members(&db, &member_ids);
+    // Scoped to this group and not gated on auto_queue: the user asked for this
+    // chain, and auto_queue governs starting work nobody asked for.
+    queue::start_group_members(&db, &app, task.project_id, group_id);
+
+    Ok(serde_json::json!({
+        "groupId": group_id,
+        "queued": member_ids,
+        "trunkBranch": trunk,
+    }))
+}
+
+/// The waves that would run for a task, for the confirmation prompt.
+#[tauri::command]
+pub fn plan_prerequisites(id: i64) -> Vec<Vec<tq::Task>> {
+    crate::services::orchestration::plan_prerequisites(&db::get_db(), id)
+}
+
 #[tauri::command]
 pub fn change_task_status(
     app: AppHandle,
