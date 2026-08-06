@@ -179,6 +179,22 @@ pub fn stopped_for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
     .ok()
 }
 
+/// Trunk branch and run status for one task's live or stopped run.
+///
+/// The single-task counterpart of [`trunks_by_task`], for the paths that emit one
+/// task rather than a board's worth.
+pub fn run_for_task(db: &DbPool, task_id: i64) -> Option<(String, String)> {
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT g.trunk_branch, g.status FROM task_groups g
+         JOIN task_group_members m ON m.group_id = g.id
+         WHERE m.task_id = ?1 AND g.status IN ('active','stopped')",
+        params![task_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .ok()
+}
+
 /// The trunk a task's work belongs on, whether or not its run is still live.
 ///
 /// Branch cleanup needs this rather than [`for_task`]: a member still running when
@@ -452,6 +468,32 @@ mod tests {
         // A closed run has released its members, so there is nothing to resume.
         finish(&db, id, STATUS_FAILED).unwrap();
         assert!(stopped_for_task(&db, a).is_none());
+    }
+
+    #[test]
+    fn run_for_task_agrees_with_the_board_query() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let id = create(&db, 1, "trunk/agree", "main", b, &[a, b]).unwrap();
+
+        // The single-task lookup feeds every task:updated payload and the batch one
+        // feeds the board. If they disagree, a card's marker flickers between them.
+        for status in [STATUS_ACTIVE, STATUS_STOPPED] {
+            set_status(&db, id, status).unwrap();
+            let batch = trunks_by_task(&db, 1);
+            for task in [a, b] {
+                assert_eq!(
+                    run_for_task(&db, task),
+                    batch.get(&task).cloned(),
+                    "disagreement on task {task} at status {status}"
+                );
+            }
+        }
+
+        finish(&db, id, STATUS_COMPLETED).unwrap();
+        assert!(run_for_task(&db, a).is_none());
+        assert!(trunks_by_task(&db, 1).is_empty());
     }
 
     #[test]

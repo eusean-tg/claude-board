@@ -19,6 +19,8 @@ pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
                 t.trunk_branch = Some(trunk.clone());
                 t.run_stopped = run_status == crate::db::task_groups::STATUS_STOPPED;
             }
+            // Note: the batch queries above are the list-sized equivalent of
+            // tq::hydrate, which the single-task paths use.
             t
         })
         .collect()
@@ -27,7 +29,7 @@ pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
 #[tauri::command]
 pub fn get_task(id: i64) -> Result<tq::Task, String> {
     let db = db::get_db();
-    tq::get_by_id(&db, id)
+    tq::get_for_ui(&db, id)
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
             t
@@ -148,7 +150,7 @@ pub fn update_task(
         },
         tags.as_deref().or(task.tags.as_deref()),
     );
-    let mut updated = tq::get_by_id(&db, id).ok_or("Failed to retrieve updated task")?;
+    let mut updated = tq::get_for_ui(&db, id).ok_or("Failed to retrieve updated task")?;
     updated.is_running = runner::is_running(id);
     app.emit("task:updated", &updated).ok();
     Ok(updated)
@@ -477,7 +479,7 @@ pub fn change_task_status(
         queue::on_task_completed(&db, &app, task.project_id, id);
     }
 
-    let mut final_task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let mut final_task = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     final_task.is_running = runner::is_running(id) || runner::is_starting(id);
     app.emit("task:updated", &final_task).ok();
 
@@ -499,8 +501,7 @@ fn execute_done_side_effects(db: &crate::db::DbPool, app: &AppHandle, id: i64, t
         let after_pr = tq::get_by_id(db, id).unwrap_or(fresh_task.clone());
         // Cleanup uses project root (manages worktrees and branches)
         let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project, db);
-        runner::stop_group_after_failed_merge(db, Some(app), id, &cleanup);
-        runner::report_branch_cleanup(cleanup, id, db, app);
+        runner::report_task_branch_outcome(cleanup, id, db, app);
         // Approving the group's target task is what lands its trunk on the base.
         if let Some(landed) =
             runner::finish_group_if_complete(db, id, &project.working_dir, &project)
@@ -665,7 +666,7 @@ pub fn request_changes(
         &format!("Revision #{}: {}", rev_num, task.title),
         serde_json::json!({"taskId": id, "taskKey": task.task_key, "title": task.title, "revision": rev_num, "feedback": feedback.trim()}),
     );
-    let mut final_task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let mut final_task = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     final_task.is_running = runner::is_running(id) || runner::is_starting(id);
     app.emit("task:updated", &final_task).ok();
     Ok(final_task)
@@ -783,7 +784,7 @@ pub fn set_task_dependency(
         }
     }
     tq::update_depends_on(&db, id, depends_on);
-    let updated = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(updated)
 }
@@ -801,7 +802,7 @@ pub fn add_task_dependency(
     tq::get_by_id(&db, dependsOnId).ok_or("Parent task not found")?;
     db::dependencies::add_dependency(&db, taskId, dependsOnId, conditionType.as_deref())
         .map_err(|e| e.to_string())?;
-    let updated = tq::get_by_id(&db, taskId).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, taskId).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(serde_json::json!({
         "task": updated,
@@ -819,7 +820,7 @@ pub fn remove_task_dependency(
 ) -> Result<serde_json::Value, String> {
     let db = db::get_db();
     db::dependencies::remove_dependency(&db, taskId, dependsOnId).map_err(|e| e.to_string())?;
-    let updated = tq::get_by_id(&db, taskId).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, taskId).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(serde_json::json!({
         "task": updated,
@@ -1159,6 +1160,43 @@ mod tests {
         )
         .unwrap();
         Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn a_single_task_read_carries_the_markers_the_board_computes() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        let gid = db::task_groups::create(&db, 1, "trunk/m", "main", child, &[child]).unwrap();
+        db::task_groups::set_status(&db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+
+        // get_by_id leaves these at their defaults, and every task:updated payload
+        // came from it — so each event overwrote what the list query had worked out
+        // and the waiting and run-stopped markers vanished from the card.
+        let plain = tq::get_by_id(&db, child).unwrap();
+        assert_eq!((plain.waiting_on, plain.run_stopped), (0, false));
+
+        let hydrated = tq::get_for_ui(&db, child).unwrap();
+
+        assert_eq!(hydrated.waiting_on, 1);
+        assert_eq!(hydrated.trunk_branch.as_deref(), Some("trunk/m"));
+        assert!(hydrated.run_stopped);
+    }
+
+    #[test]
+    fn a_hydrated_task_stops_claiming_a_run_that_ended() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let gid = db::task_groups::create(&db, 1, "trunk/gone", "main", a, &[a]).unwrap();
+        db::task_groups::finish(&db, gid, db::task_groups::STATUS_COMPLETED).unwrap();
+
+        // The other direction matters as much: a marker that outlives its run names a
+        // branch that has been deleted.
+        let hydrated = tq::get_for_ui(&db, a).unwrap();
+
+        assert_eq!(hydrated.trunk_branch, None);
+        assert!(!hydrated.run_stopped);
     }
 
     #[test]

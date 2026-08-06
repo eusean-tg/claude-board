@@ -485,7 +485,7 @@ fn handle_result(task_id: i64, event: &Value, db: &DbPool, app: &AppHandle, ctx:
         );
         add_log(task_id, &msg, "system", db, app, None);
 
-        if let Some(mut updated) = tasks::get_by_id(db, task_id) {
+        if let Some(mut updated) = tasks::get_for_ui(db, task_id) {
             updated.is_running = true; // this is called during active process execution
             app.emit("task:updated", &updated).ok();
             app.emit(

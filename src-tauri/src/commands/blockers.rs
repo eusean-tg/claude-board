@@ -221,7 +221,7 @@ pub(crate) fn cancel_open_blocker_for_task(db: &DbPool, task_id: i64) {
 
 fn emit_task(app: &tauri::AppHandle, db: &DbPool, task_id: i64) {
     use tauri::Emitter;
-    if let Some(task) = tq::get_by_id(db, task_id) {
+    if let Some(task) = tq::get_for_ui(db, task_id) {
         app.emit("task:updated", &task).ok();
     }
 }

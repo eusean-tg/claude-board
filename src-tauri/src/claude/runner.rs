@@ -64,7 +64,7 @@ pub fn is_starting(task_id: i64) -> bool {
 
 /// Fetch task and set is_running field, then emit task:updated event.
 fn emit_task_updated(db: &DbPool, app: &AppHandle, task_id: i64) {
-    if let Some(mut task) = tasks::get_by_id(db, task_id) {
+    if let Some(mut task) = tasks::get_for_ui(db, task_id) {
         task.is_running = is_running(task_id);
         app.emit("task:updated", &task).ok();
     }
@@ -1156,6 +1156,25 @@ fn cleanup_task_branch_in(
 /// of which the agent that produced the commits can see, and none of which the
 /// user is likely to be looking at. The task log is where they would find out
 /// their work is still sitting on a branch.
+/// Report what happened to a task's branch, stopping its run if the work did not
+/// reach the trunk.
+///
+/// One entry point for both, because they are one decision. The stop message already
+/// names the branch, the trunk, the reason and where both copies of the commits are;
+/// following it with the generic refusal line repeats all of that in fewer words, and
+/// three call sites were doing exactly that.
+pub fn report_task_branch_outcome(
+    outcome: BranchCleanup,
+    task_id: i64,
+    db: &DbPool,
+    app: &AppHandle,
+) {
+    if stop_group_after_failed_merge(db, Some(app), task_id, &outcome) {
+        return;
+    }
+    report_branch_cleanup(outcome, task_id, db, app);
+}
+
 pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, app: &AppHandle) {
     let (msg, level) = match outcome {
         BranchCleanup::Skipped | BranchCleanup::Deleted => return,
@@ -2006,8 +2025,7 @@ fn handle_process_lifecycle(
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
                         let cleanup =
                             cleanup_task_branch(&after_pr, project_working_dir, &proj, db);
-                        stop_group_after_failed_merge(db, Some(app), task_id, &cleanup);
-                        report_branch_cleanup(cleanup, task_id, db, app);
+                        report_task_branch_outcome(cleanup, task_id, db, app);
                         // The task's work is on the trunk now; if it was the one the
                         // group exists to deliver, the trunk goes to the base branch.
                         if let Some(landed) =
@@ -2852,8 +2870,7 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     &proj,
                                     &db,
                                 );
-                                stop_group_after_failed_merge(&db, Some(&app), task_id, &cleanup);
-                                report_branch_cleanup(cleanup, task_id, &db, &app);
+                                report_task_branch_outcome(cleanup, task_id, &db, &app);
                                 if let Some(landed) = finish_group_if_complete(
                                     &db,
                                     task_id,
@@ -3601,6 +3618,21 @@ mod tests {
             stopped,
             "a refused trunk merge has to stop the run: {outcome:?}"
         );
+        // The generic refusal line is suppressed once this has been said, so this
+        // message has to carry everything that one would have: which branch, which
+        // trunk, why, and that nothing was thrown away.
+        let logged: String = db
+            .lock()
+            .query_row(
+                "SELECT message FROM task_logs WHERE task_id=71 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(logged.contains("feature/st"), "{logged}");
+        assert!(logged.contains("trunk/feature/st"), "{logged}");
+        assert!(logged.contains("conflict"), "{logged}");
+        assert!(logged.contains("still holds its commits"), "{logged}");
         // Stopped, not failed: the run is waiting on a person rather than over.
         assert_eq!(
             crate::db::task_groups::get(&db, group).unwrap().status,
