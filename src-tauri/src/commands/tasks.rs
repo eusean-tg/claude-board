@@ -146,6 +146,49 @@ pub fn update_task(
     Ok(updated)
 }
 
+/// Whether moving to In Progress from `from` counts as starting the task.
+///
+/// A start runs against whatever its dependencies produced, so it is gated. A
+/// resume continues a run that already exists and must not be: answering a
+/// blocker, sending an agent back in after a discussion, and requesting a
+/// revision all pass through In Progress, and gating them would strand a task
+/// mid-flight whenever a parent was reopened while its agent waited.
+fn start_is_gated(from: TaskStatus) -> bool {
+    matches!(from, TaskStatus::Backlog | TaskStatus::Failed)
+}
+
+/// Refuse to start a task whose prerequisites have not run.
+///
+/// Names what has to happen first, because a Start that silently does nothing
+/// reads as a broken button. Unmet ancestors are counted transitively — reporting
+/// only the direct parent understates the work.
+fn guard_dependencies(db: &db::DbPool, task_id: i64) -> Result<(), String> {
+    let waves = db::dependencies::unmet_ancestor_waves(db, task_id);
+    if waves.is_empty() {
+        return Ok(());
+    }
+    let titles: Vec<String> = waves.iter().flatten().map(|t| t.title.clone()).collect();
+    // A toast, not a report: name a few and count the rest.
+    const SHOWN: usize = 3;
+    let listed = titles
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tail = if titles.len() > SHOWN {
+        format!(", and {} more", titles.len() - SHOWN)
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "Blocked by {} unfinished task(s): {}{}",
+        titles.len(),
+        listed,
+        tail
+    ))
+}
+
 #[tauri::command]
 pub fn change_task_status(
     app: AppHandle,
@@ -163,6 +206,15 @@ pub fn change_task_status(
 
     if from != to && !is_valid_transition(from, to) {
         return Err(format!("Invalid transition: {} -> {}", from, to));
+    }
+
+    // ── Dependency gate ──
+    // Before the status is written, not after: a refused start leaves the task
+    // exactly where it was, in Backlog, with nothing to roll back. There is no
+    // dependency-blocked state — a task waiting on another task is not in the same
+    // situation as one whose agent asked a question.
+    if to == TaskStatus::InProgress && start_is_gated(from) {
+        guard_dependencies(&db, id)?;
     }
 
     // ── Apply status in DB ──
@@ -359,6 +411,9 @@ pub fn stop_task(app: AppHandle, id: i64) {
 pub fn restart_task(app: AppHandle, id: i64, mcp_port: u16) -> Result<tq::Task, String> {
     let db = db::get_db();
     let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    // Restart clears the logs and runs the task again from the beginning, so it is
+    // a start and gets the same gate as one.
+    guard_dependencies(&db, id)?;
     runner::stop(id, &db, &app);
     tq::clear_logs(&db, id);
     tq::update_status(&db, id, "in_progress");
@@ -915,4 +970,136 @@ pub fn get_agent_activity(project_id: i64) -> serde_json::Value {
         "fileMap": file_map,
         "conflicts": conflicts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use rusqlite::{params, Connection};
+    use std::sync::Arc;
+
+    fn test_db() -> db::DbPool {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        crate::db::schema::create_tables(&conn);
+        crate::db::schema::run_migrations(&conn);
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id,name,slug,working_dir) VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn seed_task(db: &db::DbPool, title: &str) -> i64 {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO tasks (project_id,title,status) VALUES (1,?1,'backlog')",
+            params![title],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn set_status(db: &db::DbPool, id: i64, status: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                params![id, status],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn starting_a_task_with_an_unfinished_dependency_is_refused() {
+        let db = test_db();
+        let parent = seed_task(&db, "build the parser");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+
+        let err = guard_dependencies(&db, child).expect_err("should be refused");
+
+        // The message has to name what to do about it, not just say no.
+        assert!(err.contains("build the parser"), "got: {err}");
+    }
+
+    #[test]
+    fn starting_a_ready_task_is_allowed() {
+        let db = test_db();
+        let child = seed_task(&db, "child");
+
+        assert!(guard_dependencies(&db, child).is_ok());
+    }
+
+    #[test]
+    fn a_finished_dependency_stops_blocking() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, parent, "done");
+
+        assert!(guard_dependencies(&db, child).is_ok());
+    }
+
+    #[test]
+    fn the_refusal_counts_transitive_ancestors_not_only_parents() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        db::dependencies::add_dependency(&db, b, a, None).unwrap();
+        db::dependencies::add_dependency(&db, c, b, None).unwrap();
+
+        let err = guard_dependencies(&db, c).expect_err("should be refused");
+
+        // Two tasks have to run before c, not one. Reporting only the direct parent
+        // understates the work and makes the refusal look arbitrary.
+        assert!(err.contains('2'), "got: {err}");
+    }
+
+    #[test]
+    fn a_long_list_of_blockers_is_summarised_rather_than_dumped() {
+        let db = test_db();
+        let child = seed_task(&db, "child");
+        for i in 0..6 {
+            let p = seed_task(&db, &format!("parent {i}"));
+            db::dependencies::add_dependency(&db, child, p, None).unwrap();
+        }
+
+        let err = guard_dependencies(&db, child).expect_err("should be refused");
+
+        assert!(err.contains("more"), "a six-task list needs a tail: {err}");
+        assert!(err.len() < 200, "message is a toast, not a report: {err}");
+    }
+
+    #[test]
+    fn a_standing_start_is_gated_and_a_resume_is_not() {
+        // Gated: nothing is in flight and no completed work is being revisited.
+        assert!(start_is_gated(TaskStatus::Backlog));
+        assert!(start_is_gated(TaskStatus::Failed));
+
+        // Not gated: these continue or revisit a run that already produced work.
+        // Gating them would strand a task mid-flight when a parent is reopened
+        // while its agent waits for an answer.
+        assert!(!start_is_gated(TaskStatus::Blocked));
+        assert!(!start_is_gated(TaskStatus::Testing));
+        assert!(!start_is_gated(TaskStatus::AwaitingApproval));
+        assert!(!start_is_gated(TaskStatus::Done));
+    }
+
+    #[test]
+    fn an_unmet_dependency_does_not_stop_an_agent_resuming_from_blocked() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, child, "blocked");
+
+        // The guard would refuse this task, so the only thing keeping the answer
+        // path working is that Blocked is not a gated origin.
+        assert!(guard_dependencies(&db, child).is_err());
+        assert!(!start_is_gated(TaskStatus::Blocked));
+    }
 }
