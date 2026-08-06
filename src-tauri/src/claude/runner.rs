@@ -6,7 +6,7 @@ use crate::db::{activity, attachments, projects, roles, snippets, tasks, templat
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter};
 
@@ -1263,6 +1263,69 @@ fn copy_task_attachments(
 }
 
 /// Build Claude CLI arguments from task configuration.
+/// Every place the bundled MCP sidecar can live, in the order to try them.
+///
+/// The layouts genuinely differ, and one of them is not `<exe-dir>/resources`:
+///
+/// - Dev builds put it at `<exe-dir>/resources/mcp-server.js`, and so do the
+///   Windows and Linux bundles, where resources sit beside the executable.
+/// - A macOS `.app` puts the executable in `Contents/MacOS` and its resources in
+///   `Contents/Resources`, so the sidecar is at
+///   `Contents/Resources/resources/mcp-server.js` — a sibling of the executable's
+///   directory, not a child of it.
+///
+/// Tauri's own resource directory is tried first when it is available, since it
+/// knows the layout per platform. The explicit candidates cover the case where the
+/// app handle is not set, and are what makes this testable.
+fn mcp_sidecar_candidates(exe_dir: &Path, resource_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(res) = resource_dir {
+        out.push(res.join("resources").join("mcp-server.js"));
+        out.push(res.join("mcp-server.js"));
+    }
+    out.push(exe_dir.join("resources").join("mcp-server.js"));
+    if let Some(contents) = exe_dir.parent() {
+        out.push(
+            contents
+                .join("Resources")
+                .join("resources")
+                .join("mcp-server.js"),
+        );
+    }
+    // Layouts that kept it directly beside the executable.
+    out.push(exe_dir.join("mcp-server.js"));
+    out
+}
+
+/// The first candidate that exists, or `None` when the sidecar is missing.
+fn resolve_mcp_sidecar() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let resource_dir = crate::app_handle().and_then(|app| {
+        use tauri::Manager;
+        app.path().resource_dir().ok()
+    });
+    mcp_sidecar_candidates(exe_dir, resource_dir.as_deref())
+        .into_iter()
+        .find(|p| p.exists())
+}
+
+/// The candidate list as one line, so a failure names every path that was tried
+/// rather than only the last one.
+fn sidecar_search_description() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "<the executable's own path could not be read>".to_string();
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return "<the executable has no parent directory>".to_string();
+    };
+    mcp_sidecar_candidates(exe_dir, None)
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_claude_args(
     prompt: &str,
@@ -1289,28 +1352,14 @@ fn build_claude_args(
         args.extend(["--resume".to_string(), id.to_string()]);
     }
 
-    // MCP config — sidecar lives under the bundled resources/ dir alongside the
-    // executable. Tauri places it at <exe-dir>/resources/mcp-server.js for both
-    // dev and release builds. Older layouts had it directly next to the exe, so
-    // fall back to that path if the resources/ variant is missing.
-    let mcp_server_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .map(|exe_dir| {
-            let bundled = exe_dir.join("resources").join("mcp-server.js");
-            if bundled.exists() {
-                bundled
-            } else {
-                exe_dir.join("mcp-server.js")
-            }
-        })
+    let mcp_server_path = resolve_mcp_sidecar()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    if mcp_server_path.is_empty() || !std::path::Path::new(&mcp_server_path).exists() {
+    if mcp_server_path.is_empty() {
         log::warn!(
-            "MCP sidecar (mcp-server.js) not found near executable; tasks will run without claude-board MCP tools (path tried: {})",
-            mcp_server_path
+            "MCP sidecar (mcp-server.js) not found; tasks will run without claude-board MCP tools. Looked in: {}",
+            sidecar_search_description()
         );
     }
 
@@ -2890,6 +2939,94 @@ mod tests {
 
         // Projects with auto_branch off never get one, and a resume must still run.
         assert_eq!(resolve_resume_dir(44, &dir), dir);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Builds one of the real bundle layouts under a temp dir and returns the
+    /// directory the executable would sit in.
+    fn layout(suffix: &str, sidecar_at: &[&str], exe_at: &[&str]) -> (PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("cb-sidecar-{}-{}", std::process::id(), suffix));
+        std::fs::remove_dir_all(&root).ok();
+        let exe_dir = exe_at.iter().fold(root.clone(), |acc, p| acc.join(p));
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let sidecar = sidecar_at.iter().fold(root.clone(), |acc, p| acc.join(p));
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, "// sidecar\n").unwrap();
+        (root, exe_dir)
+    }
+
+    fn found(exe_dir: &Path) -> Option<PathBuf> {
+        mcp_sidecar_candidates(exe_dir, None)
+            .into_iter()
+            .find(|p| p.exists())
+    }
+
+    #[test]
+    fn the_sidecar_is_found_inside_a_macos_app_bundle() {
+        // The layout that was broken: the executable is in Contents/MacOS and the
+        // sidecar in Contents/Resources/resources, so <exe-dir>/resources misses it
+        // and every task runs with no Claude Board tools at all.
+        let (root, exe_dir) = layout(
+            "macos",
+            &["Contents", "Resources", "resources", "mcp-server.js"],
+            &["Contents", "MacOS"],
+        );
+
+        let hit = found(&exe_dir).expect("a macOS bundle must resolve its sidecar");
+
+        assert!(
+            hit.ends_with("Contents/Resources/resources/mcp-server.js"),
+            "got {hit:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_sidecar_is_found_beside_the_executable() {
+        // Dev builds, and the Windows and Linux bundles.
+        let (root, exe_dir) = layout("beside", &["resources", "mcp-server.js"], &[]);
+
+        let hit = found(&exe_dir).expect("a resources dir beside the exe must resolve");
+
+        assert!(hit.ends_with("resources/mcp-server.js"), "got {hit:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_sidecar_is_found_directly_next_to_the_executable() {
+        // The oldest layout, kept working so an in-place upgrade does not regress.
+        let (root, exe_dir) = layout("legacy", &["mcp-server.js"], &[]);
+
+        assert!(found(&exe_dir).is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tauris_resource_directory_wins_when_it_is_known() {
+        let (root, exe_dir) = layout("resource-dir", &["resources", "mcp-server.js"], &[]);
+        let res = root.join("elsewhere");
+        std::fs::create_dir_all(res.join("resources")).unwrap();
+        std::fs::write(res.join("resources").join("mcp-server.js"), "// x\n").unwrap();
+
+        let hit = mcp_sidecar_candidates(&exe_dir, Some(&res))
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap();
+
+        // Tauri knows the per-platform layout; the guesses are the fallback.
+        assert!(hit.starts_with(&res), "got {hit:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_sidecar_resolves_to_nothing_rather_than_a_wrong_path() {
+        let root = std::env::temp_dir().join(format!("cb-sidecar-none-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Returning a path that does not exist would have node fail with its own
+        // error instead of the app reporting a missing sidecar.
+        assert!(found(&root).is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 
