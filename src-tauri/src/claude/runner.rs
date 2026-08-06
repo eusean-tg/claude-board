@@ -36,6 +36,10 @@ static EVENT_CTX: once_cell::sync::Lazy<EventContext> =
 /// Maps task_id → worktree directory path. Persists across start/test phases so auto-test reuses the same worktree.
 static TASK_WORKTREES: once_cell::sync::Lazy<WorktreeMap> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+/// One lock per repository path, guarding operations that check a branch out in the
+/// shared working tree. See [`repo_lock`].
+static REPO_LOCKS: once_cell::sync::Lazy<Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 const AGENT_NAMES: &[&str] = &[
     "Nova", "Atlas", "Spark", "Echo", "Pulse", "Drift", "Flux", "Blaze", "Cipher", "Nexus",
@@ -649,9 +653,17 @@ pub enum BranchCleanup {
 }
 
 /// True when the working directory has no uncommitted changes.
+/// Whether the working tree has changes to *tracked* files.
+///
+/// Untracked files are not counted. They cannot be absorbed by a merge — nothing
+/// stages them — and where one genuinely is in the way, git refuses on its own and
+/// that refusal keeps the branch. Counting them meant a single stray file disabled
+/// every merge in the repository, and on macOS Finder leaves a `.DS_Store` in any
+/// directory it displays, so browsing to a project silently stopped its work from
+/// ever landing.
 fn working_tree_is_clean(working_dir: &str) -> bool {
     let mut cmd = crate::child_env::command("git");
-    cmd.args(["status", "--porcelain"])
+    cmd.args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -686,7 +698,29 @@ fn current_branch(working_dir: &str) -> Option<String> {
 ///
 /// Refuses rather than forces: a dirty working directory or a conflict leaves
 /// the repository exactly as it was, and the task branch keeps the work.
+/// The lock for one repository, created on first use.
+///
+/// Keyed by the path string the caller passes. Every call site takes it from
+/// `project.working_dir`, so the same repository is always named the same way.
+fn repo_lock(working_dir: &str) -> std::sync::Arc<Mutex<()>> {
+    REPO_LOCKS
+        .lock()
+        .entry(working_dir.to_string())
+        .or_default()
+        .clone()
+}
+
 fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), MergeRefusal> {
+    // Merging checks the base branch out in the shared working tree, so two tasks
+    // finishing at once would interleave: the second reads the branch the first
+    // temporarily checked out, decides it needs no switch, and merges onto whatever
+    // the first restores. That silently lands an unapproved branch on the base.
+    // A group makes it likely rather than theoretical — a wave of prerequisites all
+    // merge onto the same trunk, and every grouped task merges whatever auto-merge
+    // says.
+    let lock = repo_lock(working_dir);
+    let _guard = lock.lock();
+
     let git = |args: &[&str]| -> bool {
         let mut cmd = crate::child_env::command("git");
         cmd.args(args)
@@ -3839,6 +3873,106 @@ mod tests {
             "uncommitted edit\n"
         );
         assert!(file_on(&root, "main", "d.txt").is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn one_lock_per_repository() {
+        let a = repo_lock("/repos/one");
+        let b = repo_lock("/repos/one");
+        let c = repo_lock("/repos/two");
+
+        // Same repo must share a lock, or the serialisation below does nothing.
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        // Different repos must not, or one project's merge blocks another's.
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+    }
+
+    #[test]
+    fn concurrent_merges_all_land_and_leave_the_user_where_they_were() {
+        let root = repo("merge-concurrent");
+        let dir = root.to_string_lossy().to_string();
+        let branches = ["feature/p1", "feature/p2", "feature/p3", "feature/p4"];
+        for (i, b) in branches.iter().enumerate() {
+            commit_on(&root, b, &format!("p{}.txt", i + 1));
+        }
+        assert!(git(&["checkout", "--quiet", "-b", "scratch"], &root));
+
+        // A wave of prerequisites finishing together, which is what raising
+        // max_concurrent above 1 produces.
+        let handles: Vec<_> = branches
+            .iter()
+            .map(|b| {
+                let (b, dir) = (b.to_string(), dir.clone());
+                std::thread::spawn(move || merge_task_branch(&b, "main", &dir))
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert!(
+            results.iter().all(|r| r == &Ok(())),
+            "every merge should succeed: {:?}",
+            results
+        );
+        // Each file reaching main is the proof no merge was lost or aborted.
+        for i in 1..=branches.len() {
+            let f = format!("p{}.txt", i);
+            assert!(
+                file_on(&root, "main", &f).is_some(),
+                "{} did not reach main",
+                f
+            );
+        }
+        // Unserialised, a thread reads the branch another has temporarily checked
+        // out, so nobody restores the branch the user was actually on.
+        assert_eq!(current_branch(&dir).as_deref(), Some("scratch"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merge_ignores_an_untracked_file() {
+        let root = repo("merge-untracked");
+        commit_on(&root, "feature/u", "u.txt");
+        // What Finder leaves behind in any directory it displays. Treating it as a
+        // dirty tree refused every merge in the repository, which broke landing work
+        // for a reason no user could see.
+        std::fs::write(root.join(".DS_Store"), "junk\n").unwrap();
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(merge_task_branch("feature/u", "main", &dir), Ok(()));
+        assert!(file_on(&root, "main", "u.txt").is_some());
+        // Still untracked and still there: ignoring it must not mean absorbing it.
+        assert!(root.join(".DS_Store").exists());
+        assert!(file_on(&root, "main", ".DS_Store").is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_task_lands_on_the_trunk_despite_an_untracked_file() {
+        let root = repo("group-untracked");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on(&root, "feature/g", "g.txt");
+        std::fs::write(root.join(".DS_Store"), "junk\n").unwrap();
+
+        // The path the whole chain depends on: without the merge, the next task in
+        // the group branches from a trunk that never received its predecessor's work.
+        let outcome = cleanup_task_branch_in(
+            &task(9101, "feature/g"),
+            &dir,
+            &project_with_merge(&dir, 0),
+            Some("trunk/feature/g"),
+        );
+
+        assert!(
+            matches!(outcome, BranchCleanup::Merged { .. }),
+            "expected a merge onto the trunk, got {:?}",
+            outcome
+        );
+        assert!(file_on(&root, "trunk/feature/g", "g.txt").is_some());
 
         std::fs::remove_dir_all(&root).ok();
     }
