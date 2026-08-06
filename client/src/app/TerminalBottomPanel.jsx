@@ -6,7 +6,14 @@ export default function TerminalBottomPanel({ terminal, selectedTask, onSetSelec
   const canSplit = terminal.tabs.length >= 2;
 
   return (
-    <div style={{ height: terminal.bottomHeight }} className="flex-shrink-0 flex flex-col border-t border-surface-700">
+    // The height is a stored pixel value and the drag handler below only clamps it
+    // while dragging, so a tray sized in a tall window overflowed a shorter one. The
+    // cap is the same bound the drag uses — floor and ceiling both — so resizing the
+    // window can no longer produce a tray the drag would have refused to make.
+    <div
+      style={{ height: terminal.bottomHeight, maxHeight: 'max(150px, calc(100vh - 200px))' }}
+      className="flex-shrink-0 flex flex-col border-t border-surface-700"
+    >
       {/* Resize handle */}
       <div
         className="h-1.5 bg-surface-800 hover:bg-claude/50 cursor-row-resize flex-shrink-0 transition-colors"

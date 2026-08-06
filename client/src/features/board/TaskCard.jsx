@@ -292,8 +292,10 @@ const TaskCard = memo(function TaskCard({
           />
         </div>
 
-        <div className="flex items-center justify-between mt-2.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center justify-between gap-2 mt-2.5">
+          {/* min-w-0 so this can shrink: a flex item defaults to min-width:auto, which
+              let a long branch name size the row and push the buttons off the card. */}
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0 flex-1">
             {task.status === 'testing' && (
               <span className="flex items-center gap-1 text-[10px] font-medium text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">
                 <FlaskConical size={10} className={task.is_running ? 'animate-pulse' : ''} />
@@ -325,7 +327,7 @@ const TaskCard = memo(function TaskCard({
                     e.stopPropagation();
                     onRunStopped?.(task);
                   }}
-                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-[160px] text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors"
                   title={t('card.runStopped', { trunk: task.trunk_branch })}
                 >
                   <AlertTriangle size={10} className="flex-shrink-0" />
@@ -333,7 +335,7 @@ const TaskCard = memo(function TaskCard({
                 </button>
               ) : (
                 <span
-                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full text-surface-400 bg-surface-700/50"
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-[160px] text-surface-400 bg-surface-700/50"
                   title={t('card.sharedBranch')}
                 >
                   <GitBranch size={10} className="flex-shrink-0" />
@@ -376,7 +378,7 @@ const TaskCard = memo(function TaskCard({
             )}
           </div>
 
-          <div className="flex items-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+          <div className="flex flex-shrink-0 items-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
             {task.status === 'testing' && onReview && (
               <button
                 onClick={(e) => {
