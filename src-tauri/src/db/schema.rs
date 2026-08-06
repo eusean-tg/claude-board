@@ -301,6 +301,37 @@ pub fn create_tables(conn: &Connection) {
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
         );
+
+        -- A dependency chain running together on a shared trunk branch.
+        --
+        -- The group exists for the length of one chain: its trunk is cut from the
+        -- base branch, every member task branches off the trunk instead of the
+        -- base, and the trunk lands on the base when the target task completes.
+        CREATE TABLE IF NOT EXISTS task_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            trunk_branch TEXT NOT NULL,
+            base_branch TEXT NOT NULL DEFAULT 'main',
+            -- The task the user actually asked for. The rest are its prerequisites.
+            target_task_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','failed')),
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+
+        -- UNIQUE(task_id) rather than UNIQUE(group_id, task_id): a task in two
+        -- groups would have two trunks and no correct merge target. Membership is
+        -- released when a group finishes, so the constraint binds only while a
+        -- group is live and a task can join a later one.
+        CREATE TABLE IF NOT EXISTS task_group_members (
+            group_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            FOREIGN KEY (group_id) REFERENCES task_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id)
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -330,6 +361,10 @@ pub fn create_tables(conn: &Connection) {
             ON task_blocker_responses(blocker_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_discussion_task
             ON task_discussion_messages(task_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_group_members_group
+            ON task_group_members(group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_groups_project
+            ON task_groups(project_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_project ON prompt_templates(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_webhooks_project ON webhooks(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_roles_project ON roles(project_id)",
