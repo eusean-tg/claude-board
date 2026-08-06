@@ -391,6 +391,18 @@ pub fn revise(
     let path = resolve(data_dir, &artifact.stored_name)?
         .to_string_lossy()
         .to_string();
+    // Says whether the body was rewritten, because that is the part that cannot be
+    // recovered: a document changing under the user is otherwise silent.
+    log::info!(
+        "Revised artifact {} ({}){}",
+        id,
+        artifact.stored_name,
+        if content.is_some() {
+            " — body rewritten"
+        } else {
+            " — metadata only"
+        }
+    );
     Ok(SavedArtifact {
         id,
         stored_name: artifact.stored_name,

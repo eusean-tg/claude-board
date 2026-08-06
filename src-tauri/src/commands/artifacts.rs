@@ -218,6 +218,15 @@ pub(crate) fn delete_artifact_in(db: &db::DbPool, data_dir: &str, id: i64) -> Re
     // pass, while an orphaned row shows a document that cannot be opened.
     db::artifacts::delete(db, id).map_err(|e| e.to_string())?;
     artifact_store::remove(data_dir, &artifact.stored_name)?;
+    // Logged at the same level as the save it undoes. Without this, a document
+    // that was saved and then removed leaves no trace of the removal, which makes
+    // a deliberate deletion indistinguishable from a bug.
+    log::info!(
+        "Deleted artifact {} ({}) — was {}",
+        id,
+        artifact.title.as_deref().unwrap_or("untitled"),
+        artifact.stored_name
+    );
     Ok(())
 }
 
