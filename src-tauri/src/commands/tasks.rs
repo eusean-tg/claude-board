@@ -175,6 +175,13 @@ pub fn change_task_status(
         tq::reset_retry_count(&db, id);
     }
 
+    // The user moved a blocked task on rather than answering it. Close the
+    // question with it: left open it would refuse the next raise, and the panel
+    // would keep rendering a question nobody is waiting on.
+    if from == TaskStatus::Blocked {
+        crate::commands::blockers::cancel_open_blocker_for_task(&db, id);
+    }
+
     if to == TaskStatus::InProgress {
         // Timer management
         if task.started_at.is_none() {

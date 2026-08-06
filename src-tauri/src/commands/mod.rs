@@ -2,6 +2,7 @@ pub mod app;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;
+pub mod blockers;
 pub mod chat;
 pub mod claude_manager;
 pub mod git_utils;

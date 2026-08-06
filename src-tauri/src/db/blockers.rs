@@ -286,6 +286,31 @@ pub fn open_for_task(db: &DbPool, task_id: i64) -> Option<Blocker> {
     Some(blocker)
 }
 
+/// Every question raised on a task, newest first, each with its options.
+///
+/// The whole history rather than just the open one: what was asked and what was
+/// answered is the record of why the task went the way it did.
+pub fn for_task(db: &DbPool, task_id: i64) -> Vec<Blocker> {
+    let conn = db.lock();
+    let mut stmt =
+        match conn.prepare("SELECT * FROM task_blockers WHERE task_id=?1 ORDER BY id DESC") {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("blockers for_task: {}", e);
+                return vec![];
+            }
+        };
+    let mut out: Vec<Blocker> = Vec::new();
+    match stmt.query_map(params![task_id], row_to_blocker) {
+        Ok(rows) => out.extend(rows.filter_map(|r| r.ok())),
+        Err(e) => log::error!("blockers for_task: {}", e),
+    }
+    for b in &mut out {
+        b.options = options_with(&conn, b.id);
+    }
+    out
+}
+
 /// A blocker by id, whatever its status, with its options.
 pub fn get(db: &DbPool, blocker_id: i64) -> Option<Blocker> {
     let conn = db.lock();
