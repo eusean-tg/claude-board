@@ -1278,23 +1278,27 @@ fn copy_task_attachments(
 /// knows the layout per platform. The explicit candidates cover the case where the
 /// app handle is not set, and are what makes this testable.
 fn mcp_sidecar_candidates(exe_dir: &Path, resource_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+    // The bundle first, everywhere. It is the shipped artifact: the plain source
+    // file imports two npm packages and only resolves them from inside this
+    // repository, so outside it Node exits with ERR_MODULE_NOT_FOUND before Claude
+    // can list a tool. The unbundled name stays as a fallback for a tree where the
+    // bundle has not been generated yet.
+    const NAMES: [&str; 2] = ["mcp-server.bundle.js", "mcp-server.js"];
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(res) = resource_dir {
-        out.push(res.join("resources").join("mcp-server.js"));
-        out.push(res.join("mcp-server.js"));
+        dirs.push(res.join("resources"));
+        dirs.push(res.to_path_buf());
     }
-    out.push(exe_dir.join("resources").join("mcp-server.js"));
+    dirs.push(exe_dir.join("resources"));
     if let Some(contents) = exe_dir.parent() {
-        out.push(
-            contents
-                .join("Resources")
-                .join("resources")
-                .join("mcp-server.js"),
-        );
+        dirs.push(contents.join("Resources").join("resources"));
     }
     // Layouts that kept it directly beside the executable.
-    out.push(exe_dir.join("mcp-server.js"));
-    out
+    dirs.push(exe_dir.to_path_buf());
+
+    dirs.iter()
+        .flat_map(|d| NAMES.iter().map(move |n| d.join(n)))
+        .collect()
 }
 
 /// The first candidate that exists, or `None` when the sidecar is missing.
@@ -2979,6 +2983,24 @@ mod tests {
             hit.ends_with("Contents/Resources/resources/mcp-server.js"),
             "got {hit:?}"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_dependency_inlined_bundle_wins_over_the_plain_source() {
+        // Both names can sit in the same directory: the source is committed and the
+        // bundle is generated beside it. Picking the source would ship a file whose
+        // imports cannot resolve outside this repository.
+        let (root, exe_dir) = layout("prefers-bundle", &["resources", "mcp-server.js"], &[]);
+        std::fs::write(
+            exe_dir.join("resources").join("mcp-server.bundle.js"),
+            "// bundled\n",
+        )
+        .unwrap();
+
+        let hit = found(&exe_dir).unwrap();
+
+        assert!(hit.ends_with("mcp-server.bundle.js"), "got {hit:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 

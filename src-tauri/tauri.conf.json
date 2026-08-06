@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../client/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "pnpm run client",
-    "beforeBuildCommand": "pnpm run build"
+    "beforeDevCommand": "pnpm run mcp:bundle && pnpm run client",
+    "beforeBuildCommand": "pnpm run mcp:bundle && pnpm run build"
   },
   "app": {
     "windows": [],
@@ -34,7 +34,9 @@
     "macOS": {
       "minimumSystemVersion": "10.15"
     },
-    "resources": ["resources/mcp-server.js"],
+    "resources": [
+      "resources/mcp-server.bundle.js"
+    ],
     "publisher": "Bahri Hirfanoglu",
     "createUpdaterArtifacts": true
   },
