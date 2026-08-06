@@ -7,7 +7,8 @@
  * Runs as a stdio server — Claude Code spawns it as a subprocess.
  *
  * Tools: list_projects, list_tasks, create_task, update_task, change_task_status,
- *        get_task_detail, delete_task, list_task_summary
+ *        get_task_detail, delete_task, list_task_summary, list_artifacts, save_artifact,
+ *        update_artifact, raise_blocker
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -311,6 +312,85 @@ server.tool(
     });
     return {
       content: [{ type: 'text', text: `Updated artifact ${saved.id} at ${saved.path}` }],
+    };
+  },
+);
+
+// ─── raise_blocker ───
+server.tool(
+  'raise_blocker',
+  'Ask the user a question and wait for their answer. Use this when you cannot make ' +
+    'progress without a decision only they can make — an ambiguous requirement, a ' +
+    'choice between approaches with real trade-offs, a missing credential, work that ' +
+    'would touch something outside the task. Prefer offering options over free text: ' +
+    'name the choices you would pick between and say what each one means. Do NOT use ' +
+    'this for decisions you can reasonably make yourself, or to confirm work you have ' +
+    'already done. One question at a time — a task can have only one open blocker.',
+  {
+    taskId: z.number().describe('The task you are working on'),
+    kind: z
+      .enum(['single_choice', 'multi_choice', 'free_text'])
+      .describe(
+        'single_choice for one of several options, multi_choice when several can ' +
+          'apply together, free_text when you cannot enumerate the answers',
+      ),
+    question: z.string().describe('The question, in one or two sentences'),
+    header: z
+      .string()
+      .optional()
+      .describe('Two or three words naming the decision, e.g. "Auth flow"'),
+    context: z
+      .string()
+      .optional()
+      .describe('What you established before getting stuck, so the user need not re-derive it'),
+    options: z
+      .array(
+        z.object({
+          label: z.string().describe('The choice, short enough to read at a glance'),
+          description: z.string().optional().describe('What picking this one means'),
+        }),
+      )
+      .optional()
+      .describe('Required for single_choice and multi_choice'),
+    artifactId: z
+      .number()
+      .optional()
+      .describe('The document the question is about, if there is one'),
+    waitSeconds: z
+      .number()
+      .optional()
+      .describe('How long to wait. Defaults to 5 minutes; leave unset unless you have a reason'),
+  },
+  async ({ taskId, kind, question, header, context, options, artifactId, waitSeconds }) => {
+    const result = await api(`/api/tasks/${taskId}/blockers`, {
+      method: 'POST',
+      body: JSON.stringify({ kind, question, header, context, options, artifactId, waitSeconds }),
+    });
+    if (result.answered) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `The user answered: ${result.summary}\n\nCarry on with the task using that answer.`,
+          },
+        ],
+      };
+    }
+    // Not an error: nobody was there to answer. Stopping cleanly is the right
+    // outcome — the task stays blocked and is resumed with the answer later, in
+    // this worktree, so uncommitted work is kept.
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            'Nobody answered in time. Stop working on this task now. Leave your ' +
+            'changes exactly as they are — do not revert, clean up, or guess at the ' +
+            'answer. Summarise what you completed and what you were waiting on, then ' +
+            'end your turn. The task stays blocked and will be resumed with the ' +
+            'answer.',
+        },
+      ],
     };
   },
 );

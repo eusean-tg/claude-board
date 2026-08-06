@@ -12,6 +12,7 @@ struct Strings {
     test_failed: &'static str,
     revision_requested: &'static str,
     queue_started: &'static str,
+    blocker_raised: &'static str,
     body_started: &'static str,
     body_completed: &'static str,
     body_failed: &'static str,
@@ -19,6 +20,7 @@ struct Strings {
     body_test_failed: &'static str,
     body_revision: &'static str,
     body_queue: &'static str,
+    body_blocker: &'static str,
     body_unknown_error: &'static str,
 }
 
@@ -34,6 +36,7 @@ fn strings(_lang: &str) -> Strings {
         test_failed: "Test Failed",
         revision_requested: "Revision Requested",
         queue_started: "Queue Started",
+        blocker_raised: "Question Waiting",
         body_started: "Claude started working",
         body_completed: "Completed \u{2014} ready for review",
         body_failed: "Failed",
@@ -41,6 +44,7 @@ fn strings(_lang: &str) -> Strings {
         body_test_failed: "Auto-test failed \u{2014} revision needed",
         body_revision: "Revision feedback sent to Claude",
         body_queue: "Auto-started from queue",
+        body_blocker: "Claude is blocked and needs an answer",
         body_unknown_error: "unknown error",
     }
 }
@@ -187,6 +191,31 @@ pub fn notify_test_failed(app: &AppHandle, info: &TaskNotification) {
     send(
         app,
         &format!("Claude Board \u{2014} {}", i.test_failed),
+        &body,
+    );
+}
+
+/// An agent stopped to ask something and is waiting on an answer.
+///
+/// Carries the question itself rather than a generic line: the point of the
+/// notification is that the user can decide from it whether to go and answer now.
+pub fn notify_blocker_raised(app: &AppHandle, info: &TaskNotification, question: &str) {
+    let db = db::get_db();
+    let s = settings::get(&db);
+    if !s.notify_blocker_raised {
+        return;
+    }
+    let i = strings(&s.language);
+    let asked = question.trim();
+    let detail = if asked.is_empty() {
+        i.body_blocker
+    } else {
+        asked
+    };
+    let body = format!("{}\n\u{2753} {}", info.body_line(), detail);
+    send(
+        app,
+        &format!("Claude Board \u{2014} {}", i.blocker_raised),
         &body,
     );
 }

@@ -213,9 +213,16 @@ pub fn build_prompt(
     // the agent to wait to be asked — so save_artifact was never called unless the
     // user named it.
     parts.push(format!("Use the task tools above when the task description asks you to plan, break down work, or manage tasks. The current project_id is {}.", project_id));
+    parts.push(format!(
+        "- **raise_blocker** — Ask the user a question and wait for their answer, when \
+         you cannot proceed without a decision only they can make. Pass task_id: {}. \
+         Offer options where you can name them.",
+        task.id
+    ));
     parts.push(
-        "The artifact tools are different: reach for save_artifact whenever this task \
-         produces a document, without being asked."
+        "The artifact and blocker tools are different: reach for save_artifact whenever \
+         this task produces a document, and raise_blocker whenever you are genuinely \
+         stuck on a decision — both without being asked."
             .into(),
     );
 
@@ -236,6 +243,19 @@ pub fn build_prompt(
          and documentation that ships as part of the codebase are not artifacts and \
          belong in the repository as usual.",
         project_id, task.id
+    ));
+    // Same reasoning as the artifact line above: an inventory entry describes a
+    // capability, and an agent reads "you may ask" as "carry on and guess". This
+    // triggers on the agent's own situation — being stuck — rather than on being told.
+    parts.push(format!(
+        "- If you cannot proceed without a decision only the user can make — an \
+         ambiguous requirement, a choice between approaches with real trade-offs, a \
+         missing credential, work that reaches outside this task — stop and ask with \
+         the **raise_blocker** tool (task_id: {}) rather than guessing or picking the \
+         option that is easiest to implement. Offer the options you would choose \
+         between, and say what each one means. Decisions you can reasonably make \
+         yourself are yours to make; do not ask to confirm work already done.",
+        task.id
     ));
 
     let branch = task.branch_name.as_deref().unwrap_or("");
@@ -357,6 +377,48 @@ mod tests {
         assert!(
             instructions.contains("without being asked") || instructions.contains("If you produce"),
             "the instruction has to trigger on the agent's own output"
+        );
+    }
+
+    #[test]
+    fn asking_when_stuck_is_an_instruction_not_just_a_capability() {
+        let prompt = minimal_prompt();
+        let instructions = prompt
+            .split("## Instructions")
+            .nth(1)
+            .expect("the prompt has an Instructions section");
+
+        // Listing raise_blocker among the tools is what was done for save_artifact,
+        // and agents did not call it. The imperative is what changed that.
+        assert!(
+            instructions.contains("raise_blocker"),
+            "got {}",
+            instructions
+        );
+        assert!(
+            instructions.contains("cannot proceed"),
+            "the instruction has to trigger on being stuck, not on being asked"
+        );
+        // An agent told only "you may ask" guesses instead.
+        assert!(
+            instructions.contains("rather than guessing"),
+            "the instruction has to name the alternative it is displacing"
+        );
+    }
+
+    #[test]
+    fn the_instruction_leaves_ordinary_decisions_with_the_agent() {
+        let prompt = minimal_prompt();
+        let instructions = prompt
+            .split("## Instructions")
+            .nth(1)
+            .expect("the prompt has an Instructions section");
+
+        // Without this bound, "ask when unsure" turns into a blocker per decision,
+        // which is worse than none: the user stops reading them.
+        assert!(
+            instructions.contains("yours to make"),
+            "the instruction has to say which decisions are not worth asking about"
         );
     }
 

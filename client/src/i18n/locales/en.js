@@ -1012,6 +1012,8 @@ export default {
   'settings.notifyRevisionRequestedDesc': 'Notify when revision feedback is sent to Claude',
   'settings.notifyQueueStarted': 'Queue Auto-Started',
   'settings.notifyQueueStartedDesc': 'Notify when a task is auto-started from the queue',
+  'settings.notifyBlockerRaised': 'Question Waiting',
+  'settings.notifyBlockerRaisedDesc': 'Notify when Claude is blocked and needs an answer',
   'settings.soundEnabled': 'Notification Sound',
   'settings.soundEnabledDesc': 'Play the system notification sound with alerts',
   'settings.aboutTagline': 'Visual task management board for Claude Code',

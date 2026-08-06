@@ -183,6 +183,12 @@ const NOTIFICATION_ITEMS = [
     labelKey: 'settings.notifyQueueStarted',
     descKey: 'settings.notifyQueueStartedDesc',
   },
+  {
+    key: 'notify_blocker_raised',
+    icon: Bell,
+    labelKey: 'settings.notifyBlockerRaised',
+    descKey: 'settings.notifyBlockerRaisedDesc',
+  },
 ];
 
 function NotificationsTab({ settings, onChange, t }) {
@@ -680,6 +686,7 @@ const DEFAULT_SETTINGS = {
   notify_task_started: false,
   notify_revision_requested: true,
   notify_queue_started: false,
+  notify_blocker_raised: true,
   sound_enabled: true,
   auto_open_terminal: false,
 };

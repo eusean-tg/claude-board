@@ -12,6 +12,24 @@ mod services;
 mod setup;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+/// The running app, for code that has no handle threaded through it.
+///
+/// The HTTP API is the case that needs this: axum handlers are called by the
+/// server task, not by a Tauri command, so they have no `AppHandle` and cannot
+/// emit an event or raise a notification. Without it a change made by an agent —
+/// a status move, a raised blocker — never reaches the board, which is purely
+/// event-driven and does not poll.
+static APP_HANDLE: once_cell::sync::OnceCell<tauri::AppHandle> = once_cell::sync::OnceCell::new();
+
+pub(crate) fn set_app_handle(app: tauri::AppHandle) {
+    APP_HANDLE.set(app).ok();
+}
+
+/// `None` before setup finishes, and in tests, which have no Tauri app at all.
+pub(crate) fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.get().cloned()
+}
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -121,6 +139,7 @@ pub fn run() {
             }
         }))
         .setup(|app| {
+            set_app_handle(app.handle().clone());
             if let Some(cfg) = config::load(app) {
                 migration::migrate_from_electron(std::path::Path::new(&cfg.data_dir));
                 if let Err(e) = db::init_db(&cfg.data_dir) {

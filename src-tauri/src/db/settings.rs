@@ -15,6 +15,9 @@ pub struct AppSettings {
     pub notify_task_started: bool,
     pub notify_revision_requested: bool,
     pub notify_queue_started: bool,
+    /// A blocked task is waiting on a person, so this defaults on: a question
+    /// nobody sees stalls the task until its wait expires.
+    pub notify_blocker_raised: bool,
     pub sound_enabled: bool,
     pub auto_open_terminal: bool,
 }
@@ -33,6 +36,7 @@ impl Default for AppSettings {
             notify_task_started: false,
             notify_revision_requested: true,
             notify_queue_started: false,
+            notify_blocker_raised: true,
             sound_enabled: true,
             auto_open_terminal: false,
         }
@@ -68,6 +72,7 @@ pub fn get(db: &DbPool) -> AppSettings {
             "notify_task_started" => settings.notify_task_started = value == "true",
             "notify_revision_requested" => settings.notify_revision_requested = value == "true",
             "notify_queue_started" => settings.notify_queue_started = value == "true",
+            "notify_blocker_raised" => settings.notify_blocker_raised = value == "true",
             "sound_enabled" => settings.sound_enabled = value == "true",
             "auto_open_terminal" => settings.auto_open_terminal = value == "true",
             _ => {}
@@ -116,6 +121,10 @@ pub fn update(db: &DbPool, settings: &AppSettings) {
         (
             "notify_queue_started",
             settings.notify_queue_started.to_string(),
+        ),
+        (
+            "notify_blocker_raised",
+            settings.notify_blocker_raised.to_string(),
         ),
         ("sound_enabled", settings.sound_enabled.to_string()),
         (
