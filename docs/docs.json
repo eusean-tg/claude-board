@@ -65,6 +65,7 @@
                   "features/orchestration",
                   "features/battle-view",
                   "features/dependencies",
+                  "features/dependency-runs",
                   "features/queue",
                   "features/circuit-breaker",
                   "features/approval-gates",

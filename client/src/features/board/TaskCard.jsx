@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   FlaskConical,
   HelpCircle,
+  Hourglass,
 } from 'lucide-react';
 import { formatDuration, formatTokens } from '../../lib/formatters';
 import {
@@ -169,6 +170,7 @@ const TaskCard = memo(function TaskCard({
   onReview,
   onViewDetail,
   onDepDrop,
+  onRunStopped,
   draggedTask,
 }) {
   const { t } = useTranslation();
@@ -290,14 +292,56 @@ const TaskCard = memo(function TaskCard({
           />
         </div>
 
-        <div className="flex items-center justify-between mt-2.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center justify-between gap-2 mt-2.5">
+          {/* min-w-0 so this can shrink: a flex item defaults to min-width:auto, which
+              let a long branch name size the row and push the buttons off the card. */}
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0 flex-1">
             {task.status === 'testing' && (
               <span className="flex items-center gap-1 text-[10px] font-medium text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">
                 <FlaskConical size={10} className={task.is_running ? 'animate-pulse' : ''} />
                 {t('status.testing')}
               </span>
             )}
+            {/* Deliberately not the word "blocked", and not its styling: that marker
+                means an agent asked a question and needs an answer. This task needs
+                another task to finish. Only shown before the task starts, since a
+                running task's dependencies were met when it began. */}
+            {task.status === 'backlog' && (task.waiting_on ?? 0) > 0 && (
+              <span
+                className="flex items-center gap-1 text-[10px] font-medium text-surface-400 bg-surface-700/50 px-1.5 py-0.5 rounded"
+                title={t('card.waitingOn', { count: task.waiting_on })}
+              >
+                <Hourglass size={10} />
+                {t('card.waitingOn', { count: task.waiting_on })}
+              </span>
+            )}
+            {/* A stopped run is the only thing on a card that needs a person and
+                says nothing about the task's own status: every task in it reports
+                something that looks fine. Red and named, or it reads as routine. */}
+            {task.trunk_branch &&
+              (task.run_stopped ? (
+                // A button, because a stopped run has something to do about it. The
+                // click must not also open the task detail underneath.
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRunStopped?.(task);
+                  }}
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-[160px] text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                  title={t('card.runStopped', { trunk: task.trunk_branch })}
+                >
+                  <AlertTriangle size={10} className="flex-shrink-0" />
+                  <span className="truncate">{t('card.runStoppedShort')}</span>
+                </button>
+              ) : (
+                <span
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-[160px] text-surface-400 bg-surface-700/50"
+                  title={t('card.sharedBranch')}
+                >
+                  <GitBranch size={10} className="flex-shrink-0" />
+                  <span className="truncate">{task.trunk_branch}</span>
+                </span>
+              ))}
             {/* Ahead of the running marker: a blocked task is waiting on a person,
                 and it pulses because it is the one state that costs time silently. */}
             {task.status === 'blocked' && (
@@ -334,7 +378,7 @@ const TaskCard = memo(function TaskCard({
             )}
           </div>
 
-          <div className="flex items-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+          <div className="flex flex-shrink-0 items-center gap-0.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
             {task.status === 'testing' && onReview && (
               <button
                 onClick={(e) => {

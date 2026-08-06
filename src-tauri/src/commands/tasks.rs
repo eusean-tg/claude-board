@@ -7,10 +7,20 @@ use tauri::{AppHandle, Emitter};
 #[tauri::command]
 pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
     let db = db::get_db();
+    // Both of these are one query for the whole board rather than one per card.
+    let waiting = db::dependencies::unmet_parent_counts(&db, project_id);
+    let trunks = db::task_groups::trunks_by_task(&db, project_id);
     tq::get_by_project(&db, project_id)
         .into_iter()
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
+            t.waiting_on = waiting.get(&t.id).copied().unwrap_or(0);
+            if let Some((trunk, run_status)) = trunks.get(&t.id) {
+                t.trunk_branch = Some(trunk.clone());
+                t.run_stopped = run_status == crate::db::task_groups::STATUS_STOPPED;
+            }
+            // Note: the batch queries above are the list-sized equivalent of
+            // tq::hydrate, which the single-task paths use.
             t
         })
         .collect()
@@ -19,7 +29,7 @@ pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
 #[tauri::command]
 pub fn get_task(id: i64) -> Result<tq::Task, String> {
     let db = db::get_db();
-    tq::get_by_id(&db, id)
+    tq::get_for_ui(&db, id)
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
             t
@@ -140,10 +150,207 @@ pub fn update_task(
         },
         tags.as_deref().or(task.tags.as_deref()),
     );
-    let mut updated = tq::get_by_id(&db, id).ok_or("Failed to retrieve updated task")?;
+    let mut updated = tq::get_for_ui(&db, id).ok_or("Failed to retrieve updated task")?;
     updated.is_running = runner::is_running(id);
     app.emit("task:updated", &updated).ok();
     Ok(updated)
+}
+
+/// Whether moving to In Progress from `from` counts as starting the task.
+///
+/// A start runs against whatever its dependencies produced, so it is gated. A
+/// resume continues a run that already exists and must not be: answering a
+/// blocker, sending an agent back in after a discussion, and requesting a
+/// revision all pass through In Progress, and gating them would strand a task
+/// mid-flight whenever a parent was reopened while its agent waited.
+fn start_is_gated(from: TaskStatus) -> bool {
+    matches!(from, TaskStatus::Backlog | TaskStatus::Failed)
+}
+
+/// Refuse to start a task whose prerequisites have not run.
+///
+/// Names what has to happen first, because a Start that silently does nothing
+/// reads as a broken button. Unmet ancestors are counted transitively — reporting
+/// only the direct parent understates the work.
+fn guard_dependencies(db: &db::DbPool, task_id: i64) -> Result<(), String> {
+    let waves = db::dependencies::unmet_ancestor_waves(db, task_id);
+    if waves.is_empty() {
+        return Ok(());
+    }
+    let titles: Vec<String> = waves.iter().flatten().map(|t| t.title.clone()).collect();
+    // A toast, not a report: name a few and count the rest.
+    const SHOWN: usize = 3;
+    let listed = titles
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tail = if titles.len() > SHOWN {
+        format!(", and {} more", titles.len() - SHOWN)
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "Blocked by {} unfinished task(s): {}{}",
+        titles.len(),
+        listed,
+        tail
+    ))
+}
+
+/// Run a task by running everything it depends on first.
+///
+/// The way forward from the refusal `change_task_status` gives a task with unmet
+/// prerequisites. Creates a group over the target's unmet ancestor closure, cuts a
+/// trunk branch for it, and starts the members that are ready. Each completion
+/// carries the chain forward.
+///
+/// A single ready task gets no group: one branch off the base is already correct,
+/// and a trunk plus two merges to land one task is ceremony with two extra chances
+/// to conflict.
+#[tauri::command]
+pub fn start_task_with_prerequisites(
+    app: AppHandle,
+    id: i64,
+    mcp_port: u16,
+) -> Result<serde_json::Value, String> {
+    use crate::services::orchestration;
+    let db = db::get_db();
+    let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let project = pq::get_by_id(&db, task.project_id).ok_or("Project not found")?;
+
+    let waves = orchestration::plan_prerequisites(&db, id);
+    let member_ids: Vec<i64> = waves.iter().flatten().map(|t| t.id).collect();
+
+    if member_ids.len() <= 1 {
+        let started = change_task_status(app, id, "in_progress".into(), mcp_port)?;
+        return Ok(serde_json::json!({
+            "groupId": null,
+            "queued": [started.id],
+            "trunkBranch": null,
+        }));
+    }
+
+    let claimed = orchestration::claimed_members(&db, &member_ids);
+    if !claimed.is_empty() {
+        return Err(format!(
+            "{} of these tasks already belong to another run",
+            claimed.len()
+        ));
+    }
+    // A stopped run keeps hold of its members so the board can mark them, and
+    // UNIQUE(task_id) would refuse the new membership rows. Starting a fresh run over
+    // those tasks is a decision to give up on the stopped one, so close it here
+    // rather than failing with a constraint error nobody can act on.
+    for closed in db::task_groups::abandon_stopped(&db, &member_ids) {
+        log::info!(
+            "closed stopped run {} to start a new one over its tasks",
+            closed
+        );
+    }
+
+    let trunk = orchestration::trunk_branch_name(&task);
+    let base = project
+        .pr_base_branch
+        .clone()
+        .unwrap_or_else(|| "main".into());
+    orchestration::create_trunk_branch(&project.working_dir, &trunk, &base)?;
+
+    let group_id = db::task_groups::create(&db, task.project_id, &trunk, &base, id, &member_ids)
+        .map_err(|e| e.to_string())?;
+
+    orchestration::prepare_members(&db, &member_ids);
+    // Scoped to this group and not gated on auto_queue: the user asked for this
+    // chain, and auto_queue governs starting work nobody asked for.
+    queue::start_group_members(&db, &app, task.project_id, group_id);
+
+    Ok(serde_json::json!({
+        "groupId": group_id,
+        "queued": member_ids,
+        "trunkBranch": trunk,
+    }))
+}
+
+/// The stopped run a task belongs to, or a refusal naming why there is nothing to do.
+///
+/// Both resolution commands go through this. The buttons are only rendered for a
+/// stopped run, so arriving here without one means the board is stale — worth saying
+/// rather than resolving nothing and reporting success.
+fn resolvable_run(db: &db::DbPool, task_id: i64) -> Result<db::task_groups::TaskGroup, String> {
+    db::task_groups::stopped_for_task(db, task_id)
+        .ok_or_else(|| "This task is not part of a stopped run".to_string())
+}
+
+/// Carry a stopped run on from where it stopped.
+///
+/// Merges whatever is still missing from the trunk, then returns the run to active and
+/// starts the members that are ready. Works whether the user merged the refused branch
+/// by hand or fixed the cause and wants another attempt.
+///
+/// The run stays stopped if a branch still cannot merge. Carrying on into the same
+/// refusal would start the rest of the chain against work that is still not there.
+#[tauri::command]
+pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Value, String> {
+    let db = db::get_db();
+    let group = resolvable_run(&db, task_id)?;
+    let project = pq::get_by_id(&db, group.project_id).ok_or("Project not found")?;
+
+    match runner::remerge_stopped_members(&db, &group, &project.working_dir) {
+        runner::RunResumeOutcome::StillRefused { branch, refusal } => Err(format!(
+            "{} still cannot be merged into {}: {}",
+            branch,
+            group.trunk_branch,
+            refusal.reason()
+        )),
+        runner::RunResumeOutcome::Ready { merged } => {
+            db::task_groups::set_status(&db, group.id, db::task_groups::STATUS_ACTIVE)
+                .map_err(|e| e.to_string())?;
+            let members = db::task_groups::members(&db, group.id);
+            queue::start_group_members(&db, &app, group.project_id, group.id);
+            let started: Vec<i64> = members
+                .into_iter()
+                .filter(|id| runner::is_running(*id) || runner::is_starting(*id))
+                .collect();
+            activity::add(
+                &db,
+                group.project_id,
+                Some(task_id),
+                "run_resumed",
+                &format!("Dependency run resumed on {}", group.trunk_branch),
+                None,
+            );
+            app.emit("task:updated", &serde_json::json!({"resumed": group.id}))
+                .ok();
+            Ok(serde_json::json!({"resumed": true, "merged": merged, "started": started}))
+        }
+    }
+}
+
+/// Give up on a stopped run, releasing its tasks so they can run in another.
+///
+/// The trunk is left alone. It holds whatever did merge, and deleting it here would
+/// destroy the only copy of that work.
+#[tauri::command]
+pub fn abandon_run(task_id: i64) -> Result<serde_json::Value, String> {
+    let db = db::get_db();
+    let group = resolvable_run(&db, task_id)?;
+    db::task_groups::abandon_stopped(&db, &[task_id]);
+    activity::add(
+        &db,
+        group.project_id,
+        Some(task_id),
+        "run_abandoned",
+        &format!("Dependency run abandoned; {} kept", group.trunk_branch),
+        None,
+    );
+    Ok(serde_json::json!({"abandoned": true, "trunk": group.trunk_branch}))
+}
+
+/// The waves that would run for a task, for the confirmation prompt.
+#[tauri::command]
+pub fn plan_prerequisites(id: i64) -> Vec<Vec<tq::Task>> {
+    crate::services::orchestration::plan_prerequisites(&db::get_db(), id)
 }
 
 #[tauri::command]
@@ -163,6 +370,15 @@ pub fn change_task_status(
 
     if from != to && !is_valid_transition(from, to) {
         return Err(format!("Invalid transition: {} -> {}", from, to));
+    }
+
+    // ── Dependency gate ──
+    // Before the status is written, not after: a refused start leaves the task
+    // exactly where it was, in Backlog, with nothing to roll back. There is no
+    // dependency-blocked state — a task waiting on another task is not in the same
+    // situation as one whose agent asked a question.
+    if to == TaskStatus::InProgress && start_is_gated(from) {
+        guard_dependencies(&db, id)?;
     }
 
     // ── Apply status in DB ──
@@ -263,7 +479,7 @@ pub fn change_task_status(
         queue::on_task_completed(&db, &app, task.project_id, id);
     }
 
-    let mut final_task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let mut final_task = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     final_task.is_running = runner::is_running(id) || runner::is_starting(id);
     app.emit("task:updated", &final_task).ok();
 
@@ -284,8 +500,14 @@ fn execute_done_side_effects(db: &crate::db::DbPool, app: &AppHandle, id: i64, t
         runner::auto_create_pr_public(&fresh_task, &pr_dir, &project, db, app);
         let after_pr = tq::get_by_id(db, id).unwrap_or(fresh_task.clone());
         // Cleanup uses project root (manages worktrees and branches)
-        let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project);
-        runner::report_branch_cleanup(cleanup, id, db, app);
+        let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project, db);
+        runner::report_task_branch_outcome(cleanup, id, db, app);
+        // Approving the group's target task is what lands its trunk on the base.
+        if let Some(landed) =
+            runner::finish_group_if_complete(db, id, &project.working_dir, &project)
+        {
+            runner::report_branch_cleanup(landed, id, db, app);
+        }
 
         // Auto-close linked GitHub issue
         if project.github_sync_enabled.unwrap_or(0) == 1 {
@@ -359,6 +581,9 @@ pub fn stop_task(app: AppHandle, id: i64) {
 pub fn restart_task(app: AppHandle, id: i64, mcp_port: u16) -> Result<tq::Task, String> {
     let db = db::get_db();
     let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    // Restart clears the logs and runs the task again from the beginning, so it is
+    // a start and gets the same gate as one.
+    guard_dependencies(&db, id)?;
     runner::stop(id, &db, &app);
     tq::clear_logs(&db, id);
     tq::update_status(&db, id, "in_progress");
@@ -441,7 +666,7 @@ pub fn request_changes(
         &format!("Revision #{}: {}", rev_num, task.title),
         serde_json::json!({"taskId": id, "taskKey": task.task_key, "title": task.title, "revision": rev_num, "feedback": feedback.trim()}),
     );
-    let mut final_task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let mut final_task = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     final_task.is_running = runner::is_running(id) || runner::is_starting(id);
     app.emit("task:updated", &final_task).ok();
     Ok(final_task)
@@ -559,7 +784,7 @@ pub fn set_task_dependency(
         }
     }
     tq::update_depends_on(&db, id, depends_on);
-    let updated = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, id).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(updated)
 }
@@ -577,7 +802,7 @@ pub fn add_task_dependency(
     tq::get_by_id(&db, dependsOnId).ok_or("Parent task not found")?;
     db::dependencies::add_dependency(&db, taskId, dependsOnId, conditionType.as_deref())
         .map_err(|e| e.to_string())?;
-    let updated = tq::get_by_id(&db, taskId).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, taskId).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(serde_json::json!({
         "task": updated,
@@ -595,7 +820,7 @@ pub fn remove_task_dependency(
 ) -> Result<serde_json::Value, String> {
     let db = db::get_db();
     db::dependencies::remove_dependency(&db, taskId, dependsOnId).map_err(|e| e.to_string())?;
-    let updated = tq::get_by_id(&db, taskId).ok_or("Task not found")?;
+    let updated = tq::get_for_ui(&db, taskId).ok_or("Task not found")?;
     app.emit("task:updated", &updated).ok();
     Ok(serde_json::json!({
         "task": updated,
@@ -915,4 +1140,190 @@ pub fn get_agent_activity(project_id: i64) -> serde_json::Value {
         "fileMap": file_map,
         "conflicts": conflicts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use rusqlite::{params, Connection};
+    use std::sync::Arc;
+
+    fn test_db() -> db::DbPool {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        crate::db::schema::create_tables(&conn);
+        crate::db::schema::run_migrations(&conn);
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id,name,slug,working_dir) VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn a_single_task_read_carries_the_markers_the_board_computes() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        let gid = db::task_groups::create(&db, 1, "trunk/m", "main", child, &[child]).unwrap();
+        db::task_groups::set_status(&db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+
+        // get_by_id leaves these at their defaults, and every task:updated payload
+        // came from it — so each event overwrote what the list query had worked out
+        // and the waiting and run-stopped markers vanished from the card.
+        let plain = tq::get_by_id(&db, child).unwrap();
+        assert_eq!((plain.waiting_on, plain.run_stopped), (0, false));
+
+        let hydrated = tq::get_for_ui(&db, child).unwrap();
+
+        assert_eq!(hydrated.waiting_on, 1);
+        assert_eq!(hydrated.trunk_branch.as_deref(), Some("trunk/m"));
+        assert!(hydrated.run_stopped);
+    }
+
+    #[test]
+    fn a_hydrated_task_stops_claiming_a_run_that_ended() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let gid = db::task_groups::create(&db, 1, "trunk/gone", "main", a, &[a]).unwrap();
+        db::task_groups::finish(&db, gid, db::task_groups::STATUS_COMPLETED).unwrap();
+
+        // The other direction matters as much: a marker that outlives its run names a
+        // branch that has been deleted.
+        let hydrated = tq::get_for_ui(&db, a).unwrap();
+
+        assert_eq!(hydrated.trunk_branch, None);
+        assert!(!hydrated.run_stopped);
+    }
+
+    #[test]
+    fn resolving_a_task_that_is_not_in_a_stopped_run_is_refused() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+
+        // Nothing to resolve, and no run to name. Reporting success here would tell
+        // the user a stopped run had been carried on when none existed.
+        assert!(resolvable_run(&db, a).is_err());
+
+        let gid = db::task_groups::create(&db, 1, "trunk/x", "main", a, &[a]).unwrap();
+        // An active run is not resolvable either: its members are still working.
+        assert!(resolvable_run(&db, a).is_err());
+
+        db::task_groups::set_status(&db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+        assert_eq!(resolvable_run(&db, a).map(|g| g.id).ok(), Some(gid));
+    }
+
+    fn seed_task(db: &db::DbPool, title: &str) -> i64 {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO tasks (project_id,title,status) VALUES (1,?1,'backlog')",
+            params![title],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn set_status(db: &db::DbPool, id: i64, status: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                params![id, status],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn starting_a_task_with_an_unfinished_dependency_is_refused() {
+        let db = test_db();
+        let parent = seed_task(&db, "build the parser");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+
+        let err = guard_dependencies(&db, child).expect_err("should be refused");
+
+        // The message has to name what to do about it, not just say no.
+        assert!(err.contains("build the parser"), "got: {err}");
+    }
+
+    #[test]
+    fn starting_a_ready_task_is_allowed() {
+        let db = test_db();
+        let child = seed_task(&db, "child");
+
+        assert!(guard_dependencies(&db, child).is_ok());
+    }
+
+    #[test]
+    fn a_finished_dependency_stops_blocking() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, parent, "done");
+
+        assert!(guard_dependencies(&db, child).is_ok());
+    }
+
+    #[test]
+    fn the_refusal_counts_transitive_ancestors_not_only_parents() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        db::dependencies::add_dependency(&db, b, a, None).unwrap();
+        db::dependencies::add_dependency(&db, c, b, None).unwrap();
+
+        let err = guard_dependencies(&db, c).expect_err("should be refused");
+
+        // Two tasks have to run before c, not one. Reporting only the direct parent
+        // understates the work and makes the refusal look arbitrary.
+        assert!(err.contains('2'), "got: {err}");
+    }
+
+    #[test]
+    fn a_long_list_of_blockers_is_summarised_rather_than_dumped() {
+        let db = test_db();
+        let child = seed_task(&db, "child");
+        for i in 0..6 {
+            let p = seed_task(&db, &format!("parent {i}"));
+            db::dependencies::add_dependency(&db, child, p, None).unwrap();
+        }
+
+        let err = guard_dependencies(&db, child).expect_err("should be refused");
+
+        assert!(err.contains("more"), "a six-task list needs a tail: {err}");
+        assert!(err.len() < 200, "message is a toast, not a report: {err}");
+    }
+
+    #[test]
+    fn a_standing_start_is_gated_and_a_resume_is_not() {
+        // Gated: nothing is in flight and no completed work is being revisited.
+        assert!(start_is_gated(TaskStatus::Backlog));
+        assert!(start_is_gated(TaskStatus::Failed));
+
+        // Not gated: these continue or revisit a run that already produced work.
+        // Gating them would strand a task mid-flight when a parent is reopened
+        // while its agent waits for an answer.
+        assert!(!start_is_gated(TaskStatus::Blocked));
+        assert!(!start_is_gated(TaskStatus::Testing));
+        assert!(!start_is_gated(TaskStatus::AwaitingApproval));
+        assert!(!start_is_gated(TaskStatus::Done));
+    }
+
+    #[test]
+    fn an_unmet_dependency_does_not_stop_an_agent_resuming_from_blocked() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        db::dependencies::add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, child, "blocked");
+
+        // The guard would refuse this task, so the only thing keeping the answer
+        // path working is that Blocked is not a gated origin.
+        assert!(guard_dependencies(&db, child).is_err());
+        assert!(!start_is_gated(TaskStatus::Blocked));
+    }
 }

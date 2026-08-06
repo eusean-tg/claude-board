@@ -77,7 +77,7 @@ pub fn resume_with_discussion(
 
     tq::update_status(&db, task_id, TaskStatus::InProgress.as_str());
     tq::set_resumed(&db, task_id);
-    let updated = tq::get_by_id(&db, task_id).ok_or("task not found after the status change")?;
+    let updated = tq::get_for_ui(&db, task_id).ok_or("task not found after the status change")?;
 
     if crate::claude::runner::resume_with_discussion(
         &updated,

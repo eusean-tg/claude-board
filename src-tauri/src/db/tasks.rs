@@ -55,6 +55,18 @@ pub struct Task {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub is_running: bool,
+    /// How many of this task's dependencies have not finished. Not a column:
+    /// computed from the graph when a list is read, the way `is_running` is.
+    #[serde(default)]
+    pub waiting_on: i64,
+    /// The shared branch of the run this task belongs to, when it is in one.
+    #[serde(default)]
+    pub trunk_branch: Option<String>,
+    /// True when that run stopped and is waiting for someone to merge the trunk.
+    /// The card says so; without it a stranded task is indistinguishable from an
+    /// ordinary one sitting in Backlog.
+    #[serde(default)]
+    pub run_stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +139,38 @@ pub fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         is_running: false,
+        waiting_on: 0,
+        trunk_branch: None,
+        run_stopped: false,
     })
+}
+
+/// Read a task with the fields the board computes rather than stores.
+///
+/// `waiting_on`, `trunk_branch` and `run_stopped` are derived from the dependency
+/// graph and from run membership, so a plain [`get_by_id`] leaves them at their
+/// defaults. Emitting such a task to the frontend overwrites the values the list
+/// query worked out — which silently erased the waiting and run-stopped markers on
+/// every card as soon as anything about that task changed.
+///
+/// A wrapper rather than doing this inside `get_by_id`: the lookups take the same
+/// connection lock, and `get_by_id` is holding it.
+pub fn get_for_ui(db: &DbPool, task_id: i64) -> Option<Task> {
+    let mut task = get_by_id(db, task_id)?;
+    hydrate(db, &mut task);
+    Some(task)
+}
+
+/// Fill the computed fields on a task that was read some other way.
+pub fn hydrate(db: &DbPool, task: &mut Task) {
+    task.waiting_on = super::dependencies::unmet_parent_ids(db, task.id).len() as i64;
+    if let Some((trunk, status)) = super::task_groups::run_for_task(db, task.id) {
+        task.trunk_branch = Some(trunk);
+        task.run_stopped = status == super::task_groups::STATUS_STOPPED;
+    } else {
+        task.trunk_branch = None;
+        task.run_stopped = false;
+    }
 }
 
 pub fn update_queue_position(db: &DbPool, task_id: i64, position: i64) {

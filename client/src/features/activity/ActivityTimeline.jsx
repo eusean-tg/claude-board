@@ -24,6 +24,9 @@ const EVENT_CONFIG = {
   claude_started: { icon: Zap, color: 'text-purple-400', bg: 'bg-purple-500/10' },
   revision_requested: { icon: RotateCcw, color: 'text-orange-400', bg: 'bg-orange-500/10' },
   queue_auto_started: { icon: Activity, color: 'text-cyan-400', bg: 'bg-cyan-500/10' },
+  // A stopped run needs a person. Falling through to the default grey clock put it
+  // next to routine events, which is where it went unnoticed.
+  run_stopped: { icon: AlertTriangle, color: 'text-red-400', bg: 'bg-red-500/10' },
   project_created: { icon: Settings, color: 'text-surface-400', bg: 'bg-surface-500/10' },
 };
 

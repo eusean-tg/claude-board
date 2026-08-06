@@ -74,3 +74,11 @@ Configure git automation in your project settings:
 ## Manual Override
 
 If auto-branch is disabled, Claude agents still run in the project's working directory. You can manually create branches before starting a task, or let Claude create them as part of its work via the prompt instructions.
+
+## Shared branches for dependency chains
+
+A task started as part of a [dependency-ordered run](/features/dependency-runs) branches from its chain's trunk rather than from the base branch, and merges back into that trunk when it completes — regardless of Auto Merge, because the next task in the chain builds on it.
+
+Whether the trunk then reaches the base branch is Auto Merge's decision, the same as for a single task's branch. With it on, the trunk merges once the task you started has been approved along with every prerequisite; with it off, the trunk is kept for you to merge by hand. A conflict also keeps the trunk.
+
+A prerequisite that cannot merge into the trunk stops the chain, since every task after it would build on work that is not there.

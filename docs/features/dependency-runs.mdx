@@ -1,0 +1,123 @@
+---
+title: "Dependency-Ordered Runs"
+description: "Starting a task runs everything it depends on first, on a shared branch so each task builds on the last"
+icon: "layer-group"
+---
+
+A task whose dependencies have not finished cannot be started. Instead of running it against work that does not exist, Claude Board offers to run the whole chain: prerequisites first, in dependency order, each one building on the last.
+
+## A task waits until its dependencies are met
+
+Starting a task with unfinished prerequisites is refused, and the message names what has to happen first:
+
+```
+Blocked by 2 unfinished task(s): discovery service, tauri commands
+```
+
+The task stays in **Backlog**. It does not move, and it does not enter Blocked — that status means an agent stopped to ask *you* a question, which is a different situation with a different remedy. A task waiting on another task shows a **waiting on 2** marker on its card so the refusal reads as intent rather than a broken button.
+
+A dependency counts as met when it reaches `done` or `testing`. A parent that is failed, still running, awaiting approval, or blocked on a question has not produced anything to build on.
+
+<Note>
+This gate applies to starting a task, never to continuing one. Answering a [blocker](/features/blockers), sending an agent back in after a discussion, and requesting a revision all move a task to In Progress and are unaffected — a task mid-flight is not stranded because one of its parents was reopened.
+</Note>
+
+## Running the chain
+
+Start a task with unfinished prerequisites and Claude Board shows what it would run:
+
+<Steps>
+  <Step title="The plan" icon="list-ol">
+    Each step is a set of tasks that can run at the same time, leaves first. The last step is the task you clicked.
+  </Step>
+  <Step title="Confirm" icon="play">
+    The button names the total. Nothing starts until you confirm — a click that starts five agents is not the same decision as one that starts one.
+  </Step>
+  <Step title="The run" icon="arrow-right">
+    Ready tasks start immediately, up to the project's **Max Concurrent** limit, under Automation in project settings. Each completion starts whatever it unblocked.
+  </Step>
+</Steps>
+
+A chain runs to the end whether or not [Auto-Queue](/features/queue) is on. Auto-Queue decides whether Claude Board picks up work on its own; a chain is started deliberately, so it is not gated by that setting.
+
+A task whose prerequisites are already met needs no chain and starts on its own, with no group and no shared branch.
+
+## The shared branch
+
+The reason a chain works at all is where its tasks branch from.
+
+Ordinarily every task branches from the project's base branch. That is wrong for a dependent task: it cannot see the code it was told it depends on, and has to go looking for its sibling's branch and merge it by hand.
+
+So a chain gets a **trunk branch**, named `trunk/<type>/<slug>` after the task you started:
+
+```
+trunk/feature/wire-the-artifacts-tab
+```
+
+Every task in the chain branches from the trunk instead of the base, and merges back into it when it completes. By the time a dependent task starts, its checkout already contains its dependencies' work.
+
+| | Branches from | Merges into |
+|---|---|---|
+| A task in a chain | the chain's trunk | the chain's trunk |
+| A task on its own | the project's base branch | nothing, unless [Auto Merge](/features/git-automation) is on |
+
+Merging into the trunk is not optional and does not depend on Auto Merge. It is what makes the next task in the chain able to see the work.
+
+## Landing on the base branch
+
+Moving the base branch is what Auto Merge decides, for a chain exactly as for a single task. With it off — the default — the chain finishes and its trunk is kept:
+
+```
+Every task in this run is on trunk/feature/wire-the-artifacts-tab. Auto Merge
+is off, so main was not moved — merge trunk/feature/wire-the-artifacts-tab
+when you are ready.
+```
+
+With Auto Merge on, only the task you started moves the base branch, and only once **every** task in the chain has been approved.
+
+That wait is deliberate. A task's work reaches the trunk when it finishes running, which is before you have reviewed it. Landing the trunk any earlier would put a sibling's unreviewed changes on your base branch.
+
+When it does land, the trunk merges into the base and is deleted. Its commits are on the base branch by then, and reachability is checked before the delete rather than assumed from the merge reporting success.
+
+### When a merge is refused
+
+A trunk that cannot merge into the base is kept and the chain is marked failed. Nothing is lost — every task's work is on that trunk, and the trunk is still there. The most common cause is the base branch moving while the chain ran, so the merge conflicts on files the chain never touched.
+
+One level down the consequence is larger, so the chain stops there:
+
+```
+This run stopped. feature/discovery-service could not be merged into
+trunk/feature/wire-the-artifacts-tab because of a merge conflict, so the tasks
+after it were not started — the work they depend on is not on the trunk.
+```
+
+The task itself still reports done and its commits are safe on its own branch, which is why this is said out loud: nothing else on the board looks wrong. Every task after it was told it depends on work that is not on the trunk, and running them against a premise that is false wastes the run and produces changes built on nothing.
+
+A stopped run is announced three ways: a desktop notification, a red entry in the project's activity timeline, and a **run stopped** marker on the card of every task in the run.
+
+### Resolving it
+
+The marker is a button. It opens a panel naming the shared branch, with two ways forward:
+
+<Steps>
+  <Step title="Carry on" icon="play">
+    Merges whatever is still missing from the trunk, then runs the rest of the chain from where it stopped. Use it whether you merged the branch by hand or fixed what caused the conflict — a branch already on the trunk is left alone rather than merged twice.
+
+    If the merge is still refused, nothing starts and the panel says which branch and why. Carrying on into the same refusal would run the rest of the chain against work that is still not there.
+  </Step>
+  <Step title="Abandon run" icon="trash">
+    Gives up on the run and frees its tasks to run in another. The trunk is kept: it holds every member's work that did merge, and deleting it would destroy the only copy.
+  </Step>
+</Steps>
+
+A stopped run keeps hold of its tasks, which is how those markers know what to show. Starting a fresh chain over any of them closes the stopped run first, so nothing is claimed forever by a run nobody is going to finish.
+
+<Note>
+Stopping the chain stops the chain. If [Auto-Queue](/features/queue) is on, a task whose prerequisites are marked done can still be picked up as ordinary ready work, because dependency readiness is a question about task status rather than about what reached a branch.
+</Note>
+
+## What a chain does not touch
+
+Tasks already progressing are left where they are. A prerequisite that is running keeps running, one waiting on an answer keeps its question, and one awaiting approval keeps the work you have not reviewed. Only a **failed** prerequisite is reset, because it has to run again for the chain to proceed.
+
+A task belongs to at most one chain at a time. Starting a second chain over a task already in a live one is refused rather than moving it, since two shared branches give one task no correct place to merge. Once a chain finishes, its tasks are free to run in another.

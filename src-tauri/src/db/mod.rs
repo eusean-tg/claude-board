@@ -16,6 +16,7 @@ pub mod schema;
 pub mod settings;
 pub mod snippets;
 pub mod stats;
+pub mod task_groups;
 pub mod tasks;
 pub mod templates;
 pub mod webhooks;

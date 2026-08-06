@@ -458,37 +458,38 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
                       desc={t('projectModal.autoQueueDesc')}
                       activeColor="emerald"
                     />
-                    {autoQueue && (
-                      <Field label={t('projectModal.maxConcurrent')}>
-                        <div className="flex items-center gap-2">
-                          {[1, 2, 3, 5, 10].map((n) => (
-                            <button
-                              key={n}
-                              type="button"
-                              onClick={() => setMaxConcurrent(n)}
-                              className={`w-9 h-9 rounded-lg text-sm font-medium transition-all ${
-                                maxConcurrent === n
-                                  ? 'bg-claude text-white shadow-sm shadow-claude/20'
-                                  : 'bg-surface-800 text-surface-400 hover:text-surface-200 hover:bg-surface-700'
-                              }`}
-                            >
-                              {n}
-                            </button>
-                          ))}
-                          <input
-                            type="number"
-                            min={1}
-                            max={50}
-                            value={maxConcurrent}
-                            onChange={(e) => {
-                              const v = parseInt(e.target.value, 10);
-                              if (v >= 1 && v <= 50) setMaxConcurrent(v);
-                            }}
-                            className="w-16 h-9 rounded-lg text-sm font-medium text-center bg-surface-800 border border-surface-700 text-surface-200 focus:outline-none focus:ring-1 focus:ring-claude [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                          />
-                        </div>
-                      </Field>
-                    )}
+                    {/* Not gated on autoQueue: this caps a dependency chain too, and a
+                        chain runs whether or not auto-queue is on. Hidden here, the
+                        limit silently throttled chains to whatever was stored. */}
+                    <Field label={t('projectModal.maxConcurrent')} hint={t('projectModal.maxConcurrentDesc')}>
+                      <div className="flex items-center gap-2">
+                        {[1, 2, 3, 5, 10].map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => setMaxConcurrent(n)}
+                            className={`w-9 h-9 rounded-lg text-sm font-medium transition-all ${
+                              maxConcurrent === n
+                                ? 'bg-claude text-white shadow-sm shadow-claude/20'
+                                : 'bg-surface-800 text-surface-400 hover:text-surface-200 hover:bg-surface-700'
+                            }`}
+                          >
+                            {n}
+                          </button>
+                        ))}
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={maxConcurrent}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10);
+                            if (v >= 1 && v <= 50) setMaxConcurrent(v);
+                          }}
+                          className="w-16 h-9 rounded-lg text-sm font-medium text-center bg-surface-800 border border-surface-700 text-surface-200 focus:outline-none focus:ring-1 focus:ring-claude [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        />
+                      </div>
+                    </Field>
                   </Section>
 
                   {/* Git Workflow */}

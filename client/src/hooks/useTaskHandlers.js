@@ -11,6 +11,8 @@ export function useTaskHandlers({
   addToast,
   t,
   setConfirm,
+  setPrerequisites,
+  setRunStopped,
   terminal,
   setSelectedTask,
   setActivePanel,
@@ -25,6 +27,33 @@ export function useTaskHandlers({
       const fromStatus = task.status || 'backlog';
 
       if (newStatus === 'in_progress' && fromStatus !== 'in_progress') {
+        // Ask what would run before offering to start it. A task with unfinished
+        // prerequisites is refused by the backend, and reacting to that refusal
+        // would show an error for something the user is allowed to do — so the plan
+        // is fetched first and a different, larger confirmation is shown.
+        let waves = [];
+        try {
+          waves = (await api.planPrerequisites(taskId)) || [];
+        } catch {
+          // The plan is a convenience; a failure here must not block a start.
+        }
+        if (waves.length > 1) {
+          setPrerequisites({
+            waves,
+            onConfirm: async () => {
+              try {
+                const result = await api.startTaskWithPrerequisites(taskId);
+                setPrerequisites(null);
+                addToast(t('toast.prerequisitesStarted', { count: result?.queued?.length ?? 0 }), 'success');
+              } catch (e) {
+                addToast(e.message, 'error');
+              }
+            },
+            onClose: () => setPrerequisites(null),
+          });
+          return;
+        }
+
         setConfirm({
           title: t('toast.startClaude'),
           message: `Moving "${task.title}" to In Progress will automatically start Claude. Continue?`,
@@ -62,7 +91,7 @@ export function useTaskHandlers({
         pendingUpdates.delete(taskId);
       }
     },
-    [tasks, addToast, t, setTasks, setConfirm],
+    [tasks, addToast, t, setTasks, setConfirm, setPrerequisites],
   );
 
   const onCreate = useCallback(
@@ -224,8 +253,35 @@ export function useTaskHandlers({
     [setTasks],
   );
 
+  // Opens the resolution panel for a stopped run. Refreshing the board afterwards is
+  // what clears the markers from every card in the run, not just the one clicked.
+  const onRunStopped = useCallback(
+    (task) => {
+      setRunStopped({
+        task,
+        onClose: () => setRunStopped(null),
+        onResolved: async ({ kind, result }) => {
+          setRunStopped(null);
+          if (kind === 'resumed') {
+            addToast(t('toast.runResumed', { count: result?.started?.length ?? 0 }), 'success');
+          } else {
+            addToast(t('toast.runAbandoned', { trunk: result?.trunk ?? '' }), 'success');
+          }
+          try {
+            setTasks(await api.getTasks(task.project_id));
+          } catch {
+            // The panel is closed and the toast is shown; a stale marker is a
+            // cosmetic problem the next refresh fixes.
+          }
+        },
+      });
+    },
+    [setRunStopped, addToast, t, setTasks],
+  );
+
   return {
     onStatusChange,
+    onRunStopped,
     onCreate,
     onUpdate,
     onDelete,

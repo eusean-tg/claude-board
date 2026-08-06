@@ -2,7 +2,7 @@ use super::tasks::Task;
 use super::DbPool;
 use crate::error::AppError;
 use rusqlite::params;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Add a dependency edge: task_id depends on depends_on_id.
 /// condition_type: "always" (default), "on_success", "on_failure"
@@ -80,35 +80,166 @@ pub fn get_child_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
     result
 }
 
-/// Check if ALL parent dependencies of a task are met, respecting condition_type.
-/// - "always" / "on_success": parent must be done or testing
-/// - "on_failure": parent must have failed (status = 'failed')
-pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
-    let conn = db.lock();
+/// Whether one dependency edge is satisfied, as SQL, for a parent row aliased as
+/// `parent_alias`.
+///
+/// The single definition of the question. Every query that asks it builds its SQL
+/// from here, because separate copies drift: a proposed second version counted
+/// `awaiting_approval` as satisfied while this one does not, which would have let a
+/// task start on work nobody had approved.
+///
+/// Note that satisfaction is a property of the *edge*, not of the parent alone. An
+/// `on_failure` edge wants a failed parent, so a completed one leaves it unmet.
+///
+/// - `always` / `on_success`: parent is done or testing
+/// - `on_failure`: parent has failed
+/// - `on_any`: either
+fn edge_is_met_sql(parent_alias: &str) -> String {
+    format!(
+        "CASE COALESCE(td.condition_type, 'always')
+             WHEN 'on_failure' THEN
+                 {a}.status = 'failed'
+             WHEN 'on_any' THEN
+                 {a}.status IN ('done', 'testing', 'failed')
+             ELSE
+                 {a}.status IN ('done', 'testing')
+         END",
+        a = parent_alias
+    )
+}
 
-    // Count unmet dependencies using condition-aware logic:
-    // "always" or "on_success" → parent.status IN ('done','testing')
-    // "on_failure" → parent failed: status='failed'
-    let unmet: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dependencies td
-         JOIN tasks t ON t.id = td.depends_on_id
-         WHERE td.task_id = ?1
-         AND NOT (
-             CASE COALESCE(td.condition_type, 'always')
-                 WHEN 'on_failure' THEN
-                     t.status = 'failed'
-                 WHEN 'on_any' THEN
-                     t.status IN ('done', 'testing', 'failed')
-                 ELSE
-                     t.status IN ('done', 'testing')
-             END
-         )",
-            params![task_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    unmet == 0
+/// Parents this task is still waiting on, respecting each edge's condition.
+pub fn unmet_parent_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
+    let sql = format!(
+        "SELECT td.depends_on_id FROM task_dependencies td
+         JOIN tasks parent ON parent.id = td.depends_on_id
+         WHERE td.task_id = ?1 AND NOT ({})",
+        edge_is_met_sql("parent")
+    );
+    let conn = db.lock();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("unmet_parent_ids: {}", e);
+            return vec![];
+        }
+    };
+    let mut out: Vec<i64> = Vec::new();
+    match stmt.query_map(params![task_id], |r| r.get::<_, i64>(0)) {
+        Ok(rows) => out.extend(rows.flatten()),
+        Err(e) => log::error!("unmet_parent_ids: {}", e),
+    }
+    out
+}
+
+/// Check if ALL parent dependencies of a task are met, respecting condition_type.
+pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
+    unmet_parent_ids(db, task_id).is_empty()
+}
+
+/// How many unmet parents each task in a project has, for tasks that have any.
+///
+/// One query rather than `unmet_parent_ids` per task: this feeds the task list,
+/// which is read on every board refresh, and a query per card adds up.
+pub fn unmet_parent_counts(db: &DbPool, project_id: i64) -> HashMap<i64, i64> {
+    let sql = format!(
+        "SELECT td.task_id, COUNT(*) FROM task_dependencies td
+         JOIN tasks parent ON parent.id = td.depends_on_id
+         JOIN tasks child ON child.id = td.task_id
+         WHERE child.project_id = ?1 AND NOT ({})
+         GROUP BY td.task_id",
+        edge_is_met_sql("parent")
+    );
+    let conn = db.lock();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("unmet_parent_counts: {}", e);
+            return HashMap::new();
+        }
+    };
+    let mut out = HashMap::new();
+    match stmt.query_map(params![project_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    }) {
+        Ok(rows) => out.extend(rows.flatten()),
+        Err(e) => log::error!("unmet_parent_counts: {}", e),
+    }
+    out
+}
+
+/// Transitive ancestors of `task_id` that still have to run, ordered leaves first.
+///
+/// Empty means the task can start now — the same answer [`are_all_parents_met`]
+/// gives, because both read the one edge predicate. The target itself is never
+/// included, so a caller can enqueue these and then the target.
+///
+/// Waves are laid out by longest path rather than shortest, so a task appears only
+/// after every ancestor it transitively waits on. Two ancestors in the same wave
+/// are independent and can run together.
+pub fn unmet_ancestor_waves(db: &DbPool, task_id: i64) -> Vec<Vec<Task>> {
+    // Closure of unmet ancestors, with each task's unmet parents memoised: the
+    // depth pass below revisits them repeatedly and each lookup is a query.
+    let mut parents_of: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut pending: Vec<i64> = unmet_parent_ids(db, task_id);
+    let mut closure: HashSet<i64> = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !closure.insert(id) {
+            continue;
+        }
+        let parents = unmet_parent_ids(db, id);
+        pending.extend(parents.iter().copied());
+        parents_of.insert(id, parents);
+    }
+    if closure.is_empty() {
+        return vec![];
+    }
+
+    // Longest path from a leaf, counting only edges inside the closure: an edge to
+    // an already-satisfied task delays nothing. Relaxed until stable, which takes
+    // at most one pass per node because each pass settles at least one more level.
+    let mut depth: HashMap<i64, usize> = HashMap::new();
+    for _ in 0..closure.len() {
+        let mut changed = false;
+        for &id in &closure {
+            let d = parents_of
+                .get(&id)
+                .map(|ps| {
+                    ps.iter()
+                        .filter(|p| closure.contains(p))
+                        .map(|p| depth.get(p).copied().unwrap_or(0) + 1)
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            if depth.get(&id).copied().unwrap_or(0) != d {
+                depth.insert(id, d);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let deepest = depth.values().copied().max().unwrap_or(0);
+    let mut waves: Vec<Vec<Task>> = vec![Vec::new(); deepest + 1];
+    for &id in &closure {
+        if let Some(task) = super::tasks::get_by_id(db, id) {
+            waves[depth.get(&id).copied().unwrap_or(0)].push(task);
+        }
+    }
+    // `closure` is a HashSet, so without this the tasks inside a wave come out in
+    // whatever order the hasher produced — a confirmation prompt that lists the same
+    // work in a different order each time it opens. By id is the order the board
+    // already shows them in.
+    for wave in &mut waves {
+        wave.sort_by_key(|t| t.id);
+    }
+    // A task that vanished between the walk and the read leaves a hole, not a gap
+    // in the ordering.
+    waves.retain(|w| !w.is_empty());
+    waves
 }
 
 /// Get all backlog tasks in a project that have all dependencies met (ready to run).
@@ -116,7 +247,7 @@ pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
 /// on_failure requires parent to have exhausted retries.
 pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
     let conn = db.lock();
-    let mut stmt = match conn.prepare(
+    let sql = format!(
         "SELECT t.* FROM tasks t
          LEFT JOIN projects p ON p.id = t.project_id
          WHERE t.project_id = ?1 AND t.status = 'backlog'
@@ -126,21 +257,14 @@ pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
              SELECT 1 FROM task_dependencies td
              JOIN tasks parent ON parent.id = td.depends_on_id
              WHERE td.task_id = t.id
-             AND NOT (
-                 CASE COALESCE(td.condition_type, 'always')
-                     WHEN 'on_failure' THEN
-                         parent.status = 'failed'
-                     WHEN 'on_any' THEN
-                         parent.status IN ('done', 'testing', 'failed')
-                     ELSE
-                         parent.status IN ('done', 'testing')
-                 END
-             )
+             AND NOT ({edge})
          )
          ORDER BY
              (SELECT COUNT(*) FROM task_dependencies cd WHERE cd.depends_on_id = t.id) DESC,
-             t.priority DESC, t.queue_position ASC, t.id ASC"
-    ) {
+             t.priority DESC, t.queue_position ASC, t.id ASC",
+        edge = edge_is_met_sql("parent")
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(_) => return vec![],
     };
@@ -268,4 +392,336 @@ pub fn get_graph_data(db: &DbPool, project_id: i64) -> serde_json::Value {
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    fn test_db() -> DbPool {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        crate::db::schema::create_tables(&conn);
+        crate::db::schema::run_migrations(&conn);
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id,name,slug,working_dir) VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn seed_task(db: &DbPool, title: &str) -> i64 {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO tasks (project_id,title,status) VALUES (1,?1,'backlog')",
+            params![title],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn set_status(db: &DbPool, id: i64, status: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                params![id, status],
+            )
+            .unwrap();
+    }
+
+    fn wave_ids(waves: &[Vec<Task>]) -> Vec<Vec<i64>> {
+        waves
+            .iter()
+            .map(|w| {
+                let mut ids: Vec<i64> = w.iter().map(|t| t.id).collect();
+                ids.sort();
+                ids
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unmet_ancestor_waves_orders_leaves_first() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        add_dependency(&db, b, a, None).unwrap();
+        add_dependency(&db, c, b, None).unwrap();
+
+        let waves = unmet_ancestor_waves(&db, c);
+
+        // b cannot run before a, so it cannot share a wave with it.
+        assert_eq!(wave_ids(&waves), vec![vec![a], vec![b]]);
+    }
+
+    #[test]
+    fn unmet_ancestor_waves_skips_satisfied_parents() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+
+        assert!(unmet_ancestor_waves(&db, b).is_empty());
+    }
+
+    #[test]
+    fn unmet_ancestor_waves_groups_independent_parents_into_one_wave() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        add_dependency(&db, c, a, None).unwrap();
+        add_dependency(&db, c, b, None).unwrap();
+
+        let waves = unmet_ancestor_waves(&db, c);
+
+        assert_eq!(wave_ids(&waves), vec![vec![a, b]]);
+    }
+
+    #[test]
+    fn a_diamond_puts_the_join_after_both_of_its_branches() {
+        let db = test_db();
+        //   a → {b, c} → d → target
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        let d = seed_task(&db, "d");
+        let target = seed_task(&db, "target");
+        add_dependency(&db, b, a, None).unwrap();
+        add_dependency(&db, c, a, None).unwrap();
+        add_dependency(&db, d, b, None).unwrap();
+        add_dependency(&db, d, c, None).unwrap();
+        add_dependency(&db, target, d, None).unwrap();
+
+        let waves = unmet_ancestor_waves(&db, target);
+
+        // Depth is the longest path, not the shortest: d waits for both branches.
+        assert_eq!(wave_ids(&waves), vec![vec![a], vec![b, c], vec![d]]);
+    }
+
+    #[test]
+    fn the_counts_agree_with_the_per_task_query() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        add_dependency(&db, c, a, None).unwrap();
+        add_dependency(&db, c, b, None).unwrap();
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+
+        let counts = unmet_parent_counts(&db, 1);
+
+        // The batch query exists for speed; drifting from unmet_parent_ids would
+        // make cards disagree with the gate that actually refuses the start.
+        for id in [a, b, c] {
+            assert_eq!(
+                counts.get(&id).copied().unwrap_or(0),
+                unmet_parent_ids(&db, id).len() as i64,
+                "disagreed for task {id}"
+            );
+        }
+        // a is done, so only c still waits — on b alone.
+        assert_eq!(counts.get(&c).copied().unwrap_or(0), 1);
+        assert!(!counts.contains_key(&a));
+    }
+
+    #[test]
+    fn counts_are_scoped_to_the_project() {
+        let db = test_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO projects (id,name,slug,working_dir) VALUES (2,'O','o','/other')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id,project_id,title,status) VALUES (900,2,'far','backlog')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id,project_id,title,status) VALUES (901,2,'near','backlog')",
+                [],
+            )
+            .unwrap();
+        }
+        add_dependency(&db, 901, 900, None).unwrap();
+
+        // Another project's blocked task must not appear on this project's board.
+        assert!(unmet_parent_counts(&db, 1).is_empty());
+        assert_eq!(unmet_parent_counts(&db, 2).get(&901).copied(), Some(1));
+    }
+
+    #[test]
+    fn a_shortcut_edge_does_not_pull_a_task_into_an_earlier_wave() {
+        let db = test_db();
+        // d depends on a *and* on b, and b depends on a. The a→d edge is a shortcut
+        // past b.
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let d = seed_task(&db, "d");
+        let target = seed_task(&db, "target");
+        add_dependency(&db, b, a, None).unwrap();
+        add_dependency(&db, d, a, None).unwrap();
+        add_dependency(&db, d, b, None).unwrap();
+        add_dependency(&db, target, d, None).unwrap();
+
+        let waves = unmet_ancestor_waves(&db, target);
+
+        // Depth has to be the longest path. Taking the shortest would put d in the
+        // same wave as b, and d cannot start until b has finished.
+        assert_eq!(wave_ids(&waves), vec![vec![a], vec![b], vec![d]]);
+    }
+
+    #[test]
+    fn tasks_inside_a_wave_come_out_in_board_order() {
+        let db = test_db();
+        // Six leaves rather than two: the closure is a HashSet, and with two members
+        // an unsorted wave lands in the right order half the time by luck.
+        let leaves: Vec<i64> = (0..6)
+            .map(|i| seed_task(&db, &format!("leaf{}", i)))
+            .collect();
+        let target = seed_task(&db, "target");
+        for &leaf in &leaves {
+            add_dependency(&db, target, leaf, None).unwrap();
+        }
+
+        let waves = unmet_ancestor_waves(&db, target);
+
+        // Deliberately not `wave_ids`, which sorts before comparing: the order under
+        // test is the order the confirmation prompt renders, and a sorted comparison
+        // cannot see it. Every other wave assertion here is about membership.
+        let listed: Vec<i64> = waves[0].iter().map(|t| t.id).collect();
+        assert_eq!(
+            listed, leaves,
+            "a wave must list its tasks by id, not in hash order"
+        );
+    }
+
+    #[test]
+    fn a_task_with_no_dependencies_has_no_waves() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+
+        assert!(unmet_ancestor_waves(&db, a).is_empty());
+    }
+
+    #[test]
+    fn an_awaiting_approval_parent_is_not_satisfied() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, parent, "awaiting_approval");
+
+        // Treating this as satisfied would start the child on work nobody approved.
+        assert_eq!(
+            wave_ids(&unmet_ancestor_waves(&db, child)),
+            vec![vec![parent]]
+        );
+        assert!(!are_all_parents_met(&db, child));
+    }
+
+    #[test]
+    fn a_blocked_parent_is_not_satisfied() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, parent, "blocked");
+
+        // A parent waiting on an answer has not produced anything to build on.
+        assert_eq!(
+            wave_ids(&unmet_ancestor_waves(&db, child)),
+            vec![vec![parent]]
+        );
+    }
+
+    #[test]
+    fn a_parent_in_testing_counts_as_satisfied() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        add_dependency(&db, child, parent, None).unwrap();
+        set_status(&db, parent, "testing");
+
+        // Existing behaviour, pinned: testing means the work exists on its branch.
+        assert!(unmet_ancestor_waves(&db, child).is_empty());
+        assert!(are_all_parents_met(&db, child));
+    }
+
+    #[test]
+    fn satisfaction_follows_the_edge_condition_not_just_the_parent_status() {
+        let db = test_db();
+        let parent = seed_task(&db, "parent");
+        let child = seed_task(&db, "child");
+        add_dependency(&db, child, parent, Some("on_failure")).unwrap();
+        set_status(&db, parent, "done");
+
+        // An on_failure edge wants a failed parent. A done one does not satisfy it,
+        // so asking only "is this task finished?" gets the answer wrong.
+        assert_eq!(
+            wave_ids(&unmet_ancestor_waves(&db, child)),
+            vec![vec![parent]]
+        );
+        assert!(!are_all_parents_met(&db, child));
+
+        set_status(&db, parent, "failed");
+        assert!(unmet_ancestor_waves(&db, child).is_empty());
+        assert!(are_all_parents_met(&db, child));
+    }
+
+    #[test]
+    fn the_waves_and_are_all_parents_met_never_disagree() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+
+        // The invariant the gate depends on: empty waves must mean startable.
+        for status in [
+            "backlog",
+            "in_progress",
+            "blocked",
+            "awaiting_approval",
+            "failed",
+        ] {
+            set_status(&db, a, status);
+            assert_eq!(
+                unmet_ancestor_waves(&db, b).is_empty(),
+                are_all_parents_met(&db, b),
+                "disagreed while the parent was {status}"
+            );
+        }
+        for status in ["done", "testing"] {
+            set_status(&db, a, status);
+            assert!(unmet_ancestor_waves(&db, b).is_empty());
+            assert!(are_all_parents_met(&db, b));
+        }
+    }
+
+    #[test]
+    fn an_unmet_middle_ancestor_still_pulls_in_its_own_unmet_parents() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        add_dependency(&db, b, a, None).unwrap();
+        add_dependency(&db, c, b, None).unwrap();
+        set_status(&db, b, "failed");
+
+        // b failed, so it is unmet and has to run again — and a has to precede it.
+        assert_eq!(
+            wave_ids(&unmet_ancestor_waves(&db, c)),
+            vec![vec![a], vec![b]]
+        );
+    }
 }

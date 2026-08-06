@@ -13,6 +13,7 @@ struct Strings {
     revision_requested: &'static str,
     queue_started: &'static str,
     blocker_raised: &'static str,
+    run_stopped: &'static str,
     body_started: &'static str,
     body_completed: &'static str,
     body_failed: &'static str,
@@ -21,6 +22,7 @@ struct Strings {
     body_revision: &'static str,
     body_queue: &'static str,
     body_blocker: &'static str,
+    body_run_stopped: &'static str,
     body_unknown_error: &'static str,
 }
 
@@ -37,6 +39,7 @@ fn strings(_lang: &str) -> Strings {
         revision_requested: "Revision Requested",
         queue_started: "Queue Started",
         blocker_raised: "Question Waiting",
+        run_stopped: "Run Stopped",
         body_started: "Claude started working",
         body_completed: "Completed \u{2014} ready for review",
         body_failed: "Failed",
@@ -44,6 +47,7 @@ fn strings(_lang: &str) -> Strings {
         body_test_failed: "Auto-test failed \u{2014} revision needed",
         body_revision: "Revision feedback sent to Claude",
         body_queue: "Auto-started from queue",
+        body_run_stopped: "A dependency run needs a merge before it can go on",
         body_blocker: "Claude is blocked and needs an answer",
         body_unknown_error: "unknown error",
     }
@@ -106,6 +110,32 @@ pub fn notify_task_completed(app: &AppHandle, info: &TaskNotification) {
     send(
         app,
         &format!("Claude Board \u{2014} {}", i.task_completed),
+        &body,
+    );
+}
+
+/// A dependency run stopped because a member's work could not reach the trunk.
+///
+/// Notified for the same reason a raised blocker is: the run is waiting on a person,
+/// and every task in it still reports a status that looks fine.
+pub fn notify_run_stopped(app: &AppHandle, info: &TaskNotification, trunk: &str) {
+    let db = db::get_db();
+    let s = settings::get(&db);
+    // Shares the failure toggle rather than adding a setting nobody asked for,
+    // exactly as notify_test_failed does.
+    if !s.notify_task_failed {
+        return;
+    }
+    let i = strings(&s.language);
+    let body = format!(
+        "{}\n\u{26D4} {}: {}",
+        info.body_line(),
+        i.body_run_stopped,
+        trunk
+    );
+    send(
+        app,
+        &format!("Claude Board \u{2014} {}", i.run_stopped),
         &body,
     );
 }

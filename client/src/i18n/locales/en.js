@@ -140,6 +140,28 @@ export default {
   'blocker.answerPlaceholder': 'Type your answer',
   'blocker.waiting': 'Waiting for your answer',
 
+  // ─── Prerequisites ───
+  'prerequisites.title': 'Run prerequisites first',
+  'prerequisites.body': 'This task depends on work that has not finished. {count} tasks will run, in this order:',
+  'prerequisites.target': 'the task you started',
+  'prerequisites.together': 'these run at the same time',
+  'prerequisites.trunk': 'Shared branch:',
+  'prerequisites.confirm': 'Run {count} tasks',
+  'prerequisites.starting': 'Starting...',
+  'prerequisites.cancel': 'Cancel',
+  'runStopped.title': 'This run stopped',
+  'runStopped.body':
+    "A task's work could not be merged into the shared branch, so the tasks after it were not started. Merge it by hand, then carry the run on — or give up on the run and free its tasks.",
+  'runStopped.trunk': 'Shared branch:',
+  'runStopped.resume': 'Carry on',
+  'runStopped.resuming': 'Merging...',
+  'runStopped.abandon': 'Abandon run',
+  'runStopped.abandonConfirm': 'Abandon — release the tasks',
+  'runStopped.cancel': 'Close',
+  'toast.runResumed': 'Run resumed — {count} task(s) started',
+  'toast.runAbandoned': 'Run abandoned. {trunk} still holds its work.',
+  'toast.prerequisitesStarted': 'Started {count} tasks',
+
   // ─── Discussion ───
   'discussion.title': 'Discussion',
   'discussion.empty': 'Talk through the approach here. Nothing you write changes the work.',
@@ -161,6 +183,10 @@ export default {
   'card.viewLogs': 'View Logs',
   'card.moveTo': 'Move to',
   'card.rev': 'Rev',
+  'card.waitingOn': 'waiting on {count}',
+  'card.sharedBranch': 'Shared branch for this run',
+  'card.runStopped': 'This run stopped — merge {trunk} by hand, then start this task again',
+  'card.runStoppedShort': 'run stopped',
 
   // ─── List View ───
   'list.title': 'Title',
@@ -239,6 +265,8 @@ export default {
   'projectModal.autoQueueDisabled': 'Auto Queue Disabled',
   'projectModal.autoQueueDesc': 'Auto-start backlog tasks when a running task finishes',
   'projectModal.maxConcurrent': 'Max Concurrent',
+  'projectModal.maxConcurrentDesc':
+    'The most tasks this project runs at once, including the prerequisites of a dependency chain',
   'projectModal.permissionMode': 'Permission Mode',
   'projectModal.autoBranch': 'Auto Branch',
   'projectModal.autoBranchDesc': 'Create feature branch per task',
@@ -966,7 +994,7 @@ export default {
   'scan.custom': 'Custom',
   'scan.customPromptPlaceholder': 'Describe what you want the scan to focus on...',
   'scan.prescanInfo': 'Project info',
-  'scan.filesDetected': '{{count}} files detected',
+  'scan.filesDetected': '{count} files detected',
   'scan.estimatedTime': 'Estimated',
   'scan.cancel': 'Cancel',
   'scan.analyzing': 'Analyzing codebase...',
@@ -980,7 +1008,7 @@ export default {
   'scan.noHistory': 'No previous scans found.',
   'scan.deleteConfirm': 'Delete this scan?',
   'scan.largeCodebaseWarning':
-    'Large codebase detected ({{count}} files). Detailed scan may take several minutes. Consider using Quick scan.',
+    'Large codebase detected ({count} files). Detailed scan may take several minutes. Consider using Quick scan.',
   'scan.collectingStats': 'Collecting stats...',
   'scan.generatingReport': 'Generating report...',
 

@@ -301,6 +301,41 @@ pub fn create_tables(conn: &Connection) {
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
         );
+
+        -- A dependency chain running together on a shared trunk branch.
+        --
+        -- The group exists for the length of one chain: its trunk is cut from the
+        -- base branch, every member task branches off the trunk instead of the
+        -- base, and the trunk lands on the base when the target task completes.
+        CREATE TABLE IF NOT EXISTS task_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            trunk_branch TEXT NOT NULL,
+            base_branch TEXT NOT NULL DEFAULT 'main',
+            -- The task the user actually asked for. The rest are its prerequisites.
+            target_task_id INTEGER NOT NULL,
+            -- No CHECK: a run gained a fourth state ('stopped') and the constraint
+            -- could only be extended by rebuilding the table on every existing
+            -- install. set_status validates the name in Rust, where adding a state
+            -- costs nothing. See migrate_task_groups_status_check.
+            status TEXT DEFAULT 'active',
+            created_at DATETIME DEFAULT (datetime('now','localtime')),
+            updated_at DATETIME DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+
+        -- UNIQUE(task_id) rather than UNIQUE(group_id, task_id): a task in two
+        -- groups would have two trunks and no correct merge target. Membership is
+        -- released when a group finishes, so the constraint binds only while a
+        -- group is live and a task can join a later one.
+        CREATE TABLE IF NOT EXISTS task_group_members (
+            group_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            FOREIGN KEY (group_id) REFERENCES task_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id)
+        );
         ",
     )
     .expect("Failed to create tables");
@@ -330,6 +365,10 @@ pub fn create_tables(conn: &Connection) {
             ON task_blocker_responses(blocker_id)",
         "CREATE INDEX IF NOT EXISTS idx_task_discussion_task
             ON task_discussion_messages(task_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_group_members_group
+            ON task_group_members(group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_groups_project
+            ON task_groups(project_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_prompt_templates_project ON prompt_templates(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_webhooks_project ON webhooks(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_roles_project ON roles(project_id)",
@@ -851,6 +890,7 @@ pub fn run_migrations(conn: &Connection) {
     // Lift the four-value CHECK on tasks.status so every status the state machine
     // defines can actually be stored.
     migrate_tasks_status_check(conn);
+    migrate_task_groups_status_check(conn);
 
     // Achievements table
     conn.execute_batch(
@@ -1074,6 +1114,74 @@ pub(crate) fn migrate_tasks_status_check(conn: &Connection) {
     })();
     if let Err(e) = rebuilt {
         log::error!("Lifting the tasks.status CHECK failed, rolling back: {}", e);
+        conn.execute_batch("ROLLBACK").ok();
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON").ok();
+}
+
+/// Lift the CHECK constraint on `task_groups.status`.
+///
+/// The table shipped with `CHECK(status IN ('active','completed','failed'))`, and a
+/// run then gained a fourth state: `stopped`, meaning it is waiting for someone to
+/// merge its trunk. Writing that state into a database built with the old constraint
+/// fails, and it fails inside branch cleanup where the error is only logged — the run
+/// would look like it simply carried on.
+///
+/// Detection reads the stored DDL rather than probing with an UPDATE. A CHECK is
+/// evaluated per row, so an UPDATE that matches nothing never trips it and reports
+/// success on a database that would reject the write.
+pub(crate) fn migrate_task_groups_status_check(conn: &Connection) {
+    let Ok(sql) = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_groups'",
+        [],
+        |r| r.get::<_, String>(0),
+    ) else {
+        return;
+    };
+    let Some(check) = status_check_clause(&sql) else {
+        return;
+    };
+    let Some(body) = sql.find('(').map(|i| &sql[i..]) else {
+        return;
+    };
+
+    log::info!("Lifting the CHECK constraint on task_groups.status");
+
+    // task_group_members cascades off task_groups(id), and DROP TABLE performs an
+    // implicit DELETE FROM. With foreign keys on, the swap below would release every
+    // member of every live run.
+    conn.execute_batch("PRAGMA foreign_keys = OFF").ok();
+    let rebuilt: Result<(), rusqlite::Error> = (|| {
+        let indexes: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT sql FROM sqlite_master
+                  WHERE type='index' AND tbl_name='task_groups' AND sql IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        conn.execute_batch(&format!(
+            "CREATE TABLE task_groups_status_v2 {}",
+            body.replace(&check, "")
+        ))?;
+        // SELECT * is safe because the new table was built from the live definition,
+        // so its columns match in name and order.
+        conn.execute_batch("INSERT INTO task_groups_status_v2 SELECT * FROM task_groups")?;
+        conn.execute_batch("DROP TABLE task_groups")?;
+        conn.execute_batch("ALTER TABLE task_groups_status_v2 RENAME TO task_groups")?;
+        for idx in &indexes {
+            conn.execute_batch(idx)?;
+        }
+        conn.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+    if let Err(e) = rebuilt {
+        log::error!(
+            "Lifting the task_groups.status CHECK failed, rolling back: {}",
+            e
+        );
         conn.execute_batch("ROLLBACK").ok();
     }
     conn.execute_batch("PRAGMA foreign_keys = ON").ok();
@@ -1587,6 +1695,106 @@ mod model_migration_tests {
         assert!(conn
             .execute("UPDATE tasks SET task_type='nonsense' WHERE id=1", [])
             .is_err());
+    }
+
+    /// A database built before a run could be `stopped`.
+    fn legacy_groups_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT);
+             CREATE TABLE task_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                trunk_branch TEXT NOT NULL,
+                base_branch TEXT NOT NULL DEFAULT 'main',
+                target_task_id INTEGER NOT NULL,
+                status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','failed')),
+                created_at DATETIME, updated_at DATETIME,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_task_id) REFERENCES tasks(id) ON DELETE CASCADE
+             );
+             CREATE TABLE task_group_members (
+                group_id INTEGER NOT NULL,
+                task_id INTEGER NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES task_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                UNIQUE(task_id)
+             );
+             CREATE INDEX idx_task_groups_project_status ON task_groups(project_id, status);
+             INSERT INTO projects (id,name) VALUES (1,'p');
+             INSERT INTO tasks (id,title) VALUES (1,'a'),(2,'b');
+             INSERT INTO task_groups (id,project_id,trunk_branch,base_branch,target_task_id)
+                VALUES (1,1,'trunk/x','main',2);
+             INSERT INTO task_group_members (group_id,task_id) VALUES (1,1),(1,2);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn lifting_the_group_status_check_admits_a_stopped_run() {
+        let conn = legacy_groups_db();
+        // The state the constraint refuses, and the reason the migration exists: it
+        // is written from inside branch cleanup, where the error is only logged, so
+        // the run would look like it simply carried on.
+        assert!(conn
+            .execute("UPDATE task_groups SET status='stopped' WHERE id=1", [])
+            .is_err());
+
+        migrate_task_groups_status_check(&conn);
+
+        assert!(conn
+            .execute("UPDATE task_groups SET status='stopped' WHERE id=1", [])
+            .is_ok());
+        // DROP TABLE performs an implicit DELETE FROM, and membership cascades off
+        // task_groups(id). With foreign keys left on, the rebuild releases every
+        // member of every live run.
+        let members: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_group_members", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(members, 2, "membership must survive the rebuild");
+        let trunk: String = conn
+            .query_row("SELECT trunk_branch FROM task_groups WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(trunk, "trunk/x");
+        // Indexes go with the old table and have to be replayed.
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='idx_task_groups_project_status'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+        // And foreign keys must be back on afterwards.
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+    }
+
+    #[test]
+    fn migrating_groups_twice_changes_nothing_the_second_time() {
+        let conn = legacy_groups_db();
+        let sql = |c: &Connection| -> String {
+            c.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_groups'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        migrate_task_groups_status_check(&conn);
+        let after_first = sql(&conn);
+
+        migrate_task_groups_status_check(&conn);
+
+        assert_eq!(sql(&conn), after_first, "a second run must be a no-op");
     }
 
     #[test]

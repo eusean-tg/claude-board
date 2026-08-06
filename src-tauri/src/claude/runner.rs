@@ -36,6 +36,10 @@ static EVENT_CTX: once_cell::sync::Lazy<EventContext> =
 /// Maps task_id → worktree directory path. Persists across start/test phases so auto-test reuses the same worktree.
 static TASK_WORKTREES: once_cell::sync::Lazy<WorktreeMap> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+/// One lock per repository path, guarding operations that check a branch out in the
+/// shared working tree. See [`repo_lock`].
+static REPO_LOCKS: once_cell::sync::Lazy<Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 const AGENT_NAMES: &[&str] = &[
     "Nova", "Atlas", "Spark", "Echo", "Pulse", "Drift", "Flux", "Blaze", "Cipher", "Nexus",
@@ -60,7 +64,7 @@ pub fn is_starting(task_id: i64) -> bool {
 
 /// Fetch task and set is_running field, then emit task:updated event.
 fn emit_task_updated(db: &DbPool, app: &AppHandle, task_id: i64) {
-    if let Some(mut task) = tasks::get_by_id(db, task_id) {
+    if let Some(mut task) = tasks::get_for_ui(db, task_id) {
         task.is_running = is_running(task_id);
         app.emit("task:updated", &task).ok();
     }
@@ -208,13 +212,13 @@ fn kill_process(pid: u32) {
 
 /// Sanitize a branch name to only allow safe git ref characters.
 /// Permits alphanumeric, dash, underscore, slash, and dot.
-fn sanitize_branch_name(name: &str) -> String {
+pub(crate) fn sanitize_branch_name(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '/' || *c == '.')
         .collect::<String>()
 }
 
-fn generate_branch_slug(title: &str) -> String {
+pub(crate) fn generate_branch_slug(title: &str) -> String {
     title
         .to_lowercase()
         .replace(['ç', 'Ç'], "c")
@@ -241,6 +245,15 @@ fn generate_branch_slug(title: &str) -> String {
 /// Resolve the effective working directory for a task.
 /// If auto_branch is enabled, creates a git worktree for isolation.
 /// Returns (effective_working_dir, Option<branch_name>).
+/// The branch a task's worktree should start from.
+///
+/// Its group's trunk when it has one, the project's base branch otherwise. Kept as
+/// its own function so the choice is stated in one place rather than inline in a
+/// hundred-line worktree routine.
+fn resolve_task_base(trunk: Option<&str>, project_base: &str) -> String {
+    trunk.unwrap_or(project_base).to_string()
+}
+
 /// The worktree a task already has, if it still exists on disk.
 ///
 /// Checks `TASK_WORKTREES` first and the conventional path second. The map only
@@ -368,7 +381,19 @@ fn ensure_task_worktree(
             slug
         )
     }));
-    let base = project.pr_base_branch.as_deref().unwrap_or("main");
+    // A grouped task starts from its group's trunk, which already carries every
+    // dependency that has landed. Branching from the base instead is what left a
+    // dependent task unable to see the work it was told it depends on, and had the
+    // agent hunting for sibling branches and merging them by hand.
+    //
+    // A stopped run counts. Starting one of its members by hand should still put the
+    // task on the trunk holding the run's work; the base branch has none of it.
+    let trunk = crate::db::task_groups::trunk_for_task(db, task.id);
+    let base = resolve_task_base(
+        trunk.as_deref(),
+        project.pr_base_branch.as_deref().unwrap_or("main"),
+    );
+    let base = base.as_str();
 
     // For revisions, reuse existing worktree.
     //
@@ -588,6 +613,26 @@ fn branch_is_merged_into(branch: &str, base: &str, working_dir: &str) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Whether a local branch of this name still exists.
+///
+/// Named to avoid confusion with the test helper of the same idea: this one takes the
+/// branch first and works from a path string, like its neighbours here.
+fn branch_ref_exists(branch: &str, working_dir: &str) -> bool {
+    let mut cmd = crate::child_env::command("git");
+    cmd.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{}", branch),
+    ])
+    .current_dir(working_dir)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
 /// Why a merge into the base branch could not be attempted or did not finish.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MergeRefusal {
@@ -598,14 +643,18 @@ pub enum MergeRefusal {
     CannotCheckoutBase,
     /// The merge produced conflicts and was aborted.
     Conflict,
+    /// There is no branch of that name to merge. Reporting this as a conflict sent
+    /// people off to resolve one that did not exist.
+    UnknownBranch,
 }
 
 impl MergeRefusal {
-    fn reason(&self) -> &'static str {
+    pub(crate) fn reason(&self) -> &'static str {
         match self {
             Self::DirtyWorkingTree => "the working directory has uncommitted changes",
             Self::CannotCheckoutBase => "the base branch could not be checked out",
             Self::Conflict => "the merge conflicted and was rolled back",
+            Self::UnknownBranch => "there is no branch of that name",
         }
     }
 }
@@ -628,12 +677,23 @@ pub enum BranchCleanup {
         base: String,
         refusal: MergeRefusal,
     },
+    /// A group finished and its trunk was kept on purpose, because Auto Merge is off.
+    /// Every member's work is on the trunk, waiting to be merged by hand.
+    KeptGroupTrunk { trunk: String, base: String },
 }
 
 /// True when the working directory has no uncommitted changes.
+/// Whether the working tree has changes to *tracked* files.
+///
+/// Untracked files are not counted. They cannot be absorbed by a merge — nothing
+/// stages them — and where one genuinely is in the way, git refuses on its own and
+/// that refusal keeps the branch. Counting them meant a single stray file disabled
+/// every merge in the repository, and on macOS Finder leaves a `.DS_Store` in any
+/// directory it displays, so browsing to a project silently stopped its work from
+/// ever landing.
 fn working_tree_is_clean(working_dir: &str) -> bool {
     let mut cmd = crate::child_env::command("git");
-    cmd.args(["status", "--porcelain"])
+    cmd.args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -668,7 +728,35 @@ fn current_branch(working_dir: &str) -> Option<String> {
 ///
 /// Refuses rather than forces: a dirty working directory or a conflict leaves
 /// the repository exactly as it was, and the task branch keeps the work.
+/// The lock for one repository, created on first use.
+///
+/// Keyed by the path string the caller passes. Every call site takes it from
+/// `project.working_dir`, so the same repository is always named the same way.
+fn repo_lock(working_dir: &str) -> std::sync::Arc<Mutex<()>> {
+    REPO_LOCKS
+        .lock()
+        .entry(working_dir.to_string())
+        .or_default()
+        .clone()
+}
+
 fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), MergeRefusal> {
+    // Merging checks the base branch out in the shared working tree, so two tasks
+    // finishing at once would interleave: the second reads the branch the first
+    // temporarily checked out, decides it needs no switch, and merges onto whatever
+    // the first restores. That silently lands an unapproved branch on the base.
+    // A group makes it likely rather than theoretical — a wave of prerequisites all
+    // merge onto the same trunk, and every grouped task merges whatever auto-merge
+    // says.
+    let lock = repo_lock(working_dir);
+    let _guard = lock.lock();
+
+    // Without this, `git merge <gone>` fails and every failure below is reported as a
+    // conflict — sending the user to resolve one that does not exist.
+    if !branch_ref_exists(branch, working_dir) {
+        return Err(MergeRefusal::UnknownBranch);
+    }
+
     let git = |args: &[&str]| -> bool {
         let mut cmd = crate::child_env::command("git");
         cmd.args(args)
@@ -712,6 +800,265 @@ fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), 
     }
 }
 
+/// Land a group's trunk on its base branch, if the task that just finished was the
+/// one the group exists to deliver and every member has been approved.
+///
+/// Returns `None` when there is nothing to do — the task is not a group target, or
+/// members remain. The result is a [`BranchCleanup`] so the caller can pass it to
+/// [`report_branch_cleanup`] and have the landing show up in the task's log.
+///
+/// Members must all be `done` rather than merely finished running. Their work is
+/// already on the trunk by then, so landing early would move a sibling's unapproved
+/// changes onto the base branch.
+pub fn finish_group_if_complete(
+    db: &DbPool,
+    task_id: i64,
+    working_dir: &str,
+    project: &projects::Project,
+) -> Option<BranchCleanup> {
+    let group = crate::db::task_groups::for_task(db, task_id)?;
+    if group.target_task_id != task_id {
+        // A prerequisite finishing leaves its work on the trunk and nothing else.
+        return None;
+    }
+    let members = crate::db::task_groups::members(db, group.id);
+    let all_done = members.iter().all(|id| {
+        tasks::get_by_id(db, *id)
+            .and_then(|t| t.status)
+            .map(|s| s == crate::claude::state_machine::TaskStatus::Done.as_str())
+            .unwrap_or(false)
+    });
+    if !all_done {
+        return None;
+    }
+
+    let base = if group.base_branch.is_empty() {
+        project
+            .pr_base_branch
+            .as_deref()
+            .unwrap_or("main")
+            .to_string()
+    } else {
+        group.base_branch.clone()
+    };
+    // Moving the project's base branch is the decision Auto Merge governs, and a
+    // group does not get to override it. Merging each member onto the trunk is a
+    // different question with a different answer — the chain cannot function without
+    // it — so that stays unconditional and only this last step is a setting.
+    let outcome = if project.auto_merge.unwrap_or(0) == 1 {
+        land_trunk(working_dir, &group.trunk_branch, &base)
+    } else {
+        BranchCleanup::KeptGroupTrunk {
+            trunk: group.trunk_branch.clone(),
+            base: base.clone(),
+        }
+    };
+
+    // finish() rather than set_status(): it releases the members too. The trunk is
+    // gone on success, and when it survives — refused, or kept because Auto Merge is
+    // off — leaving the tasks claimed by this group would refuse to ever run them in
+    // another chain.
+    let status = match &outcome {
+        BranchCleanup::Merged { .. } | BranchCleanup::KeptGroupTrunk { .. } => {
+            crate::db::task_groups::STATUS_COMPLETED
+        }
+        _ => crate::db::task_groups::STATUS_FAILED,
+    };
+    if let Err(e) = crate::db::task_groups::finish(db, group.id, status) {
+        log::error!("could not close group {}: {}", group.id, e);
+    }
+    Some(outcome)
+}
+
+/// What a resume attempt found.
+#[derive(Debug)]
+pub enum RunResumeOutcome {
+    /// Every member's committed work is on the trunk. The run can carry on.
+    Ready { merged: Vec<String> },
+    /// A branch still cannot be merged, so the run stays stopped.
+    StillRefused {
+        branch: String,
+        refusal: MergeRefusal,
+    },
+}
+
+/// Put every member's committed work on the trunk, so a stopped run can carry on.
+///
+/// A member already on the trunk is skipped rather than merged again: the usual way
+/// out of a stopped run is the user merging by hand, and reporting that as work this
+/// call performed would claim something it did not do.
+///
+/// Stops at the first branch that still cannot merge. Carrying on past it would start
+/// the rest of the run against work that is still not there, which is the whole thing
+/// stopping the run prevented.
+pub fn remerge_stopped_members(
+    db: &DbPool,
+    group: &crate::db::task_groups::TaskGroup,
+    working_dir: &str,
+) -> RunResumeOutcome {
+    let mut merged = Vec::new();
+    for id in crate::db::task_groups::members(db, group.id) {
+        let Some(task) = tasks::get_by_id(db, id) else {
+            continue;
+        };
+        let Some(branch) = task.branch_name.as_deref().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if branch == group.trunk_branch {
+            continue;
+        }
+        // A member that merged successfully had its branch deleted afterwards, which
+        // is the normal end state for one that worked. `merge-base --is-ancestor`
+        // cannot answer for a ref that no longer resolves, so without this check the
+        // resume tried to merge it and failed — every time, for every member that had
+        // already done its job.
+        if !branch_ref_exists(branch, working_dir) {
+            continue;
+        }
+        if branch_is_merged_into(branch, &group.trunk_branch, working_dir) {
+            continue;
+        }
+        match merge_task_branch(branch, &group.trunk_branch, working_dir) {
+            Ok(()) => {
+                log::info!(
+                    "Resuming run {}: merged {} into {}",
+                    group.id,
+                    branch,
+                    group.trunk_branch
+                );
+                merged.push(branch.to_string());
+            }
+            Err(refusal) => {
+                return RunResumeOutcome::StillRefused {
+                    branch: branch.to_string(),
+                    refusal,
+                }
+            }
+        }
+    }
+    RunResumeOutcome::Ready { merged }
+}
+
+/// Stop a run whose member could not put its work on the trunk.
+///
+/// Every task after this one was told it depends on work that is now not there, so
+/// continuing would run them against a premise that is false. Their prerequisite
+/// reports `done` and its commits are safe on its own branch, which is exactly why
+/// this has to be said out loud: nothing else about the board looks wrong.
+///
+/// Returns true when a run was stopped, so the caller can skip trying to land it.
+pub fn stop_group_after_failed_merge(
+    db: &DbPool,
+    app: Option<&AppHandle>,
+    task_id: i64,
+    outcome: &BranchCleanup,
+) -> bool {
+    let (branch, base, refusal) = match outcome {
+        BranchCleanup::KeptMergeRefused {
+            branch,
+            base,
+            refusal,
+        } => (branch, base, refusal),
+        _ => return false,
+    };
+    let Some(group) = crate::db::task_groups::for_task(db, task_id) else {
+        return false;
+    };
+    // A refusal to merge onto the *project's* base branch is a different event: the
+    // task's own work is waiting, and no chain depends on it having landed.
+    if base != &group.trunk_branch {
+        return false;
+    }
+
+    // set_status, not finish(): a stopped run keeps its membership. That is what the
+    // board reads to mark the cards waiting on it, and what resolving it acts on.
+    if let Err(e) =
+        crate::db::task_groups::set_status(db, group.id, crate::db::task_groups::STATUS_STOPPED)
+    {
+        log::error!("could not stop group {}: {}", group.id, e);
+    }
+
+    let msg = format!(
+        "This run stopped. {} could not be merged into {} because {}, so the tasks after it were not started — the work they depend on is not on {}. Nothing is lost: {} still holds its commits, and so does {}.",
+        branch,
+        base,
+        refusal.reason(),
+        base,
+        branch,
+        base
+    );
+    tasks::add_log(db, task_id, &msg, "error", None);
+    if let Some(task) = tasks::get_by_id(db, task_id) {
+        activity::add(
+            db,
+            task.project_id,
+            Some(task_id),
+            "run_stopped",
+            &format!("Dependency run stopped: {} was not merged", branch),
+            None,
+        );
+        if let Some(app) = app {
+            // The same treatment a raised blocker gets, for the same reason: the run
+            // is waiting on a person and nothing else on the board looks wrong.
+            crate::services::notification::notify_run_stopped(
+                app,
+                &crate::services::notification::TaskNotification::new(
+                    &task.title,
+                    task.task_key.as_deref(),
+                ),
+                base,
+            );
+        }
+    }
+    if let Some(app) = app {
+        app.emit(
+            "task:log",
+            &serde_json::json!({"taskId": task_id, "message": msg, "logType": "error"}),
+        )
+        .ok();
+    }
+    log::warn!("group {} stopped: {}", group.id, msg);
+    true
+}
+
+/// Merge `trunk` into `base` and delete the trunk once its commits are reachable.
+fn land_trunk(working_dir: &str, trunk: &str, base: &str) -> BranchCleanup {
+    match merge_task_branch(trunk, base, working_dir) {
+        Ok(()) => {
+            // Reachability is what makes the delete safe, exactly as for a task
+            // branch. Do not shortcut it because the merge reported success.
+            if branch_is_merged_into(trunk, base, working_dir) {
+                let mut cmd = crate::child_env::command("git");
+                cmd.args(["branch", "-D", trunk])
+                    .current_dir(working_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(target_os = "windows")]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                cmd.output().ok();
+            }
+            log::info!("Landed group trunk {} on {}", trunk, base);
+            BranchCleanup::Merged {
+                branch: trunk.to_string(),
+                base: base.to_string(),
+            }
+        }
+        Err(refusal) => {
+            log::warn!(
+                "Keeping group trunk {}: it could not be merged into {} ({}). Merge it by hand to land the group's work.",
+                trunk,
+                base,
+                refusal.reason()
+            );
+            BranchCleanup::KeptMergeRefused {
+                branch: trunk.to_string(),
+                base: base.to_string(),
+                refusal,
+            }
+        }
+    }
+}
+
 /// Delete feature branch (local + remote) and worktree after task completion.
 /// Skips if auto_pr is enabled (branch needed for open PR).
 /// Only acts if task has a branch, the branch is not the base branch, and the
@@ -723,6 +1070,19 @@ pub fn cleanup_task_branch(
     task: &tasks::Task,
     working_dir: &str,
     project: &projects::Project,
+    db: &DbPool,
+) -> BranchCleanup {
+    let trunk = crate::db::task_groups::trunk_for_task(db, task.id);
+    cleanup_task_branch_in(task, working_dir, project, trunk.as_deref())
+}
+
+/// The body of [`cleanup_task_branch`] with the group trunk already resolved, so it
+/// can be tested against a repository without a database.
+fn cleanup_task_branch_in(
+    task: &tasks::Task,
+    working_dir: &str,
+    project: &projects::Project,
+    trunk: Option<&str>,
 ) -> BranchCleanup {
     // Always clean up worktree regardless of other settings
     cleanup_task_worktree(task.id, working_dir);
@@ -738,7 +1098,9 @@ pub fn cleanup_task_branch(
         Some(b) if !b.is_empty() => b,
         _ => return BranchCleanup::Skipped,
     };
-    let base = project.pr_base_branch.as_deref().unwrap_or("main");
+    // A grouped task lands on its trunk; the group's target task is what moves the
+    // project's base branch.
+    let base = trunk.unwrap_or_else(|| project.pr_base_branch.as_deref().unwrap_or("main"));
     if branch == base {
         return BranchCleanup::Skipped;
     }
@@ -757,8 +1119,12 @@ pub fn cleanup_task_branch(
     // With auto_merge on, this is the step that makes "done" mean "landed".
     // Without it nothing in the task lifecycle ever moves work onto the base
     // branch, so branches accumulate — safe, but never finished.
+    // Inside a group this is not optional. The next task in the chain branches from
+    // the trunk and has to see this work, so gating it behind auto_merge — off by
+    // default — would leave every dependent task building on nothing.
+    let must_merge = trunk.is_some() || project.auto_merge.unwrap_or(0) == 1;
     let mut merged_here = false;
-    if project.auto_merge.unwrap_or(0) == 1 && !branch_is_merged_into(branch, base, working_dir) {
+    if must_merge && !branch_is_merged_into(branch, base, working_dir) {
         match merge_task_branch(branch, base, working_dir) {
             Ok(()) => {
                 merged_here = true;
@@ -828,6 +1194,25 @@ pub fn cleanup_task_branch(
 /// of which the agent that produced the commits can see, and none of which the
 /// user is likely to be looking at. The task log is where they would find out
 /// their work is still sitting on a branch.
+/// Report what happened to a task's branch, stopping its run if the work did not
+/// reach the trunk.
+///
+/// One entry point for both, because they are one decision. The stop message already
+/// names the branch, the trunk, the reason and where both copies of the commits are;
+/// following it with the generic refusal line repeats all of that in fewer words, and
+/// three call sites were doing exactly that.
+pub fn report_task_branch_outcome(
+    outcome: BranchCleanup,
+    task_id: i64,
+    db: &DbPool,
+    app: &AppHandle,
+) {
+    if stop_group_after_failed_merge(db, Some(app), task_id, &outcome) {
+        return;
+    }
+    report_branch_cleanup(outcome, task_id, db, app);
+}
+
 pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, app: &AppHandle) {
     let (msg, level) = match outcome {
         BranchCleanup::Skipped | BranchCleanup::Deleted => return,
@@ -856,6 +1241,13 @@ pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, 
                 refusal.reason()
             ),
             "error",
+        ),
+        BranchCleanup::KeptGroupTrunk { trunk, base } => (
+            format!(
+                "Every task in this run is on {}. Auto Merge is off, so {} was not moved — merge {} when you are ready.",
+                trunk, base, trunk
+            ),
+            "info",
         ),
     };
 
@@ -1669,8 +2061,16 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
-                        let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
-                        report_branch_cleanup(cleanup, task_id, db, app);
+                        let cleanup =
+                            cleanup_task_branch(&after_pr, project_working_dir, &proj, db);
+                        report_task_branch_outcome(cleanup, task_id, db, app);
+                        // The task's work is on the trunk now; if it was the one the
+                        // group exists to deliver, the trunk goes to the base branch.
+                        if let Some(landed) =
+                            finish_group_if_complete(db, task_id, project_working_dir, &proj)
+                        {
+                            report_branch_cleanup(landed, task_id, db, app);
+                        }
 
                         if proj.github_sync_enabled.unwrap_or(0) == 1 {
                             if let Some(issue_num) = done_task.github_issue_number {
@@ -2502,9 +2902,21 @@ After all checks, you MUST output this exact JSON block as your final output:
                                 // Cleanup worktree + feature branch using project root dir
                                 let after_pr =
                                     tasks::get_by_id(&db, task_id).unwrap_or(done_task.clone());
-                                let cleanup =
-                                    cleanup_task_branch(&after_pr, &project_working_dir, &proj);
-                                report_branch_cleanup(cleanup, task_id, &db, &app);
+                                let cleanup = cleanup_task_branch(
+                                    &after_pr,
+                                    &project_working_dir,
+                                    &proj,
+                                    &db,
+                                );
+                                report_task_branch_outcome(cleanup, task_id, &db, &app);
+                                if let Some(landed) = finish_group_if_complete(
+                                    &db,
+                                    task_id,
+                                    &project_working_dir,
+                                    &proj,
+                                ) {
+                                    report_branch_cleanup(landed, task_id, &db, &app);
+                                }
 
                                 // Auto-close linked GitHub issue
                                 if proj.github_sync_enabled.unwrap_or(0) == 1 {
@@ -2893,6 +3305,671 @@ mod tests {
         .unwrap()
     }
 
+    /// Inserts the project and task rows the group tables have foreign keys on.
+    fn seed_rows(db: &DbPool, task_id: i64) {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+             VALUES (1,'B','b','/repo')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+             VALUES (?1,1,'Add auth','backlog')",
+            rusqlite::params![task_id],
+        )
+        .unwrap();
+    }
+
+    fn commit_on_branch(root: &Path, branch: &str, file: &str, body: &str) {
+        assert!(git(&["checkout", "--quiet", branch], root));
+        std::fs::write(root.join(file), body).unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", file], root));
+        assert!(git(&["checkout", "--quiet", "main"], root));
+    }
+
+    #[test]
+    fn a_grouped_task_branches_from_the_trunk_so_it_can_see_its_dependencies() {
+        // The assertion this whole plan exists for: a dependent task's checkout
+        // contains its dependency's code, so no agent has to find and merge
+        // sibling branches by hand.
+        let root = repo("worktree-trunk");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/g", "dep.txt", "from the dependency\n");
+        let db = test_db();
+        seed_rows(&db, 50);
+        crate::db::task_groups::create(&db, 1, "trunk/feature/g", "main", 50, &[50]).unwrap();
+
+        let (effective_dir, branch) =
+            ensure_task_worktree(&task_json(50, 0), &dir, &project_json("main"), &db);
+
+        assert!(
+            Path::new(&effective_dir).join("dep.txt").exists(),
+            "the dependency's work is missing from {effective_dir}"
+        );
+        assert!(branch.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_still_branches_from_the_base() {
+        let root = repo("worktree-no-group");
+        let dir = root.to_string_lossy().to_string();
+        // A trunk exists in the repo but this task is not in its group.
+        assert!(git(&["branch", "trunk/feature/other", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/other", "other.txt", "not mine\n");
+        let db = test_db();
+        seed_rows(&db, 51);
+
+        let (effective_dir, _) =
+            ensure_task_worktree(&task_json(51, 0), &dir, &project_json("main"), &db);
+
+        // Picking up an unrelated group's trunk would drag its work into this task.
+        assert!(!Path::new(&effective_dir).join("other.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_finished_group_does_not_send_a_task_to_a_deleted_trunk() {
+        let root = repo("worktree-finished-group");
+        let dir = root.to_string_lossy().to_string();
+        let db = test_db();
+        seed_rows(&db, 52);
+        let group = crate::db::task_groups::create(&db, 1, "trunk/feature/gone", "main", 52, &[52])
+            .unwrap();
+        // The group landed and its trunk was deleted; the branch never existed here.
+        crate::db::task_groups::finish(&db, group, crate::db::task_groups::STATUS_COMPLETED)
+            .unwrap();
+
+        let (effective_dir, branch) =
+            ensure_task_worktree(&task_json(52, 0), &dir, &project_json("main"), &db);
+
+        // Falling back to the base is what keeps this working; branching from a ref
+        // that is gone drops the task into the shared working directory instead.
+        assert!(effective_dir.contains("task-52"), "got {effective_dir}");
+        assert!(branch.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_revision_still_reuses_its_worktree_rather_than_rebuilding_from_the_trunk() {
+        let root = repo("worktree-group-revision");
+        let dir = root.to_string_lossy().to_string();
+        let wt = seed_task_worktree(&root, 53);
+        std::fs::write(wt.join("in-flight.txt"), "unfinished\n").unwrap();
+        TASK_WORKTREES.lock().remove(&53);
+        assert!(git(&["branch", "trunk/feature/r", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 53);
+        crate::db::task_groups::create(&db, 1, "trunk/feature/r", "main", 53, &[53]).unwrap();
+
+        let (effective_dir, _) =
+            ensure_task_worktree(&task_json(53, 1), &dir, &project_json("main"), &db);
+
+        // Group membership must not reintroduce the rebuild that destroys work: a
+        // revision continues where it left off, trunk or no trunk.
+        assert_eq!(effective_dir, wt.to_string_lossy());
+        assert!(wt.join("in-flight.txt").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_base_falls_back_only_when_there_is_no_trunk() {
+        assert_eq!(
+            resolve_task_base(Some("trunk/feature/g"), "main"),
+            "trunk/feature/g"
+        );
+        assert_eq!(resolve_task_base(None, "main"), "main");
+    }
+
+    /// Branches `branch` off `from`, commits `file` on it, and returns to main.
+    fn commit_on_from(root: &Path, branch: &str, file: &str, from: &str) {
+        assert!(git(&["checkout", "--quiet", "-b", branch, from], root));
+        std::fs::write(root.join(file), "work\n").unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", file], root));
+        assert!(git(&["checkout", "--quiet", "main"], root));
+    }
+
+    #[test]
+    fn a_grouped_task_merges_into_the_trunk_and_leaves_base_alone() {
+        let root = repo("cleanup-trunk");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/t", "main"], &root));
+        commit_on_from(&root, "feature/member", "m.txt", "trunk/feature/t");
+        let base_before = rev_parse(&root, "main");
+
+        let outcome = cleanup_task_branch_in(
+            &task(9100, "feature/member"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/t"),
+        );
+
+        assert_eq!(
+            outcome,
+            BranchCleanup::Merged {
+                branch: "feature/member".into(),
+                base: "trunk/feature/t".into(),
+            }
+        );
+        assert!(file_on(&root, "trunk/feature/t", "m.txt").is_some());
+        // Only the group's target task is allowed to move the base branch.
+        assert_eq!(rev_parse(&root, "main"), base_before);
+        assert!(!branch_exists(&root, "feature/member"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_task_merges_into_its_trunk_even_with_auto_merge_off() {
+        let root = repo("cleanup-trunk-no-automerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/n", "main"], &root));
+        commit_on_from(&root, "feature/member2", "m2.txt", "trunk/feature/n");
+
+        // auto_merge is off, which is the shipped default.
+        let outcome = cleanup_task_branch_in(
+            &task(9101, "feature/member2"),
+            &dir,
+            &project(&dir),
+            Some("trunk/feature/n"),
+        );
+
+        // Landing on the trunk is what the group is *for*: the next task in the
+        // chain branches from it and has to see this work. Gating that behind
+        // auto_merge would leave every dependent task building on nothing.
+        assert!(
+            file_on(&root, "trunk/feature/n", "m2.txt").is_some(),
+            "got {outcome:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_still_needs_auto_merge_to_land_anywhere() {
+        let root = repo("cleanup-ungrouped");
+        let dir = root.to_string_lossy().to_string();
+        commit_on_from(&root, "feature/solo", "s.txt", "main");
+
+        let outcome =
+            cleanup_task_branch_in(&task(9102, "feature/solo"), &dir, &project(&dir), None);
+
+        // Unchanged behaviour outside a group: nothing moves the base branch on its
+        // own, and the branch is kept because its commits live nowhere else.
+        assert!(matches!(outcome, BranchCleanup::KeptUnmerged { .. }));
+        assert!(branch_exists(&root, "feature/solo"));
+        assert!(file_on(&root, "main", "s.txt").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_conflicting_trunk_merge_keeps_the_task_branch() {
+        let root = repo("cleanup-trunk-conflict");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/c", "main"], &root));
+        // Both the trunk and the member touch the same file.
+        assert!(git(&["checkout", "--quiet", "trunk/feature/c"], &root));
+        commit_file(&root, "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        assert!(git(
+            &["checkout", "--quiet", "-b", "feature/conflict", "main"],
+            &root
+        ));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+
+        let outcome = cleanup_task_branch_in(
+            &task(9103, "feature/conflict"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/c"),
+        );
+
+        // The member's work exists nowhere else, so a refused merge must keep it.
+        assert!(matches!(outcome, BranchCleanup::KeptMergeRefused { .. }));
+        assert!(branch_exists(&root, "feature/conflict"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_task_whose_branch_is_its_own_trunk_is_left_alone() {
+        let root = repo("cleanup-trunk-self");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/s", "main"], &root));
+
+        let outcome = cleanup_task_branch_in(
+            &task(9104, "trunk/feature/s"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/s"),
+        );
+
+        // Merging a branch into itself and then deleting it would take the group's
+        // integration branch with it.
+        assert_eq!(outcome, BranchCleanup::Skipped);
+        assert!(branch_exists(&root, "trunk/feature/s"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_task_status(db: &DbPool, id: i64, status: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                rusqlite::params![id, status],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_target_task_lands_the_trunk_on_base() {
+        let root = repo("group-finish");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/f", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/f", "all.txt", "group work\n");
+        let db = test_db();
+        seed_rows(&db, 60);
+        set_task_status(&db, 60, "done");
+        crate::db::task_groups::create(&db, 1, "trunk/feature/f", "main", 60, &[60]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 60, &dir, &project_with_merge(&dir, 1))
+            .expect("should land");
+
+        assert!(
+            matches!(outcome, BranchCleanup::Merged { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "main", "all.txt").is_some());
+        // The trunk has served its purpose and its commits are on the base.
+        assert!(!branch_exists(&root, "trunk/feature/f"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_trunk_waits_for_a_hand_when_auto_merge_is_off() {
+        let root = repo("group-nomerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/w", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/w", "w.txt", "group work\n");
+        let db = test_db();
+        seed_rows(&db, 70);
+        set_task_status(&db, 70, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/w", "main", 70, &[70]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 70, &dir, &project_with_merge(&dir, 0))
+            .expect("the group still closes");
+
+        // Auto Merge off means the base branch does not move, for a run exactly as
+        // for a single task. Moving it anyway would land work the user had asked to
+        // keep off their base branch.
+        assert!(
+            matches!(outcome, BranchCleanup::KeptGroupTrunk { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "main", "w.txt").is_none());
+        // The work has to still be somewhere, and reachable by name.
+        assert!(branch_exists(&root, "trunk/feature/w"));
+        assert_eq!(
+            file_on(&root, "trunk/feature/w", "w.txt").as_deref(),
+            Some("group work\n")
+        );
+        // Completed, not failed: nothing went wrong.
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_COMPLETED
+        );
+        assert!(crate::db::task_groups::members(&db, group).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_member_that_could_not_reach_the_trunk_stops_the_run() {
+        let root = repo("group-stop");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/st", "main"], &root));
+        // The member's branch and the trunk change the same line, so the member's
+        // work cannot reach the trunk.
+        commit_on_branch(&root, "trunk/feature/st", "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "-b", "feature/st"], &root));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 71);
+        seed_rows(&db, 72);
+        set_task_status(&db, 71, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/st", "main", 72, &[71, 72])
+                .unwrap();
+
+        let outcome = cleanup_task_branch(
+            &task(71, "feature/st"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            &db,
+        );
+        let stopped = stop_group_after_failed_merge(&db, None, 71, &outcome);
+
+        assert!(
+            stopped,
+            "a refused trunk merge has to stop the run: {outcome:?}"
+        );
+        // The generic refusal line is suppressed once this has been said, so this
+        // message has to carry everything that one would have: which branch, which
+        // trunk, why, and that nothing was thrown away.
+        let logged: String = db
+            .lock()
+            .query_row(
+                "SELECT message FROM task_logs WHERE task_id=71 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(logged.contains("feature/st"), "{logged}");
+        assert!(logged.contains("trunk/feature/st"), "{logged}");
+        assert!(logged.contains("conflict"), "{logged}");
+        assert!(logged.contains("still holds its commits"), "{logged}");
+        // Stopped, not failed: the run is waiting on a person rather than over.
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_STOPPED
+        );
+        // Membership survives, because that is what tells the board which cards are
+        // stranded and what resolving the run has to act on.
+        assert_eq!(crate::db::task_groups::members(&db, group), vec![71, 72]);
+        // Task 72 was going to build on work that is not on the trunk. Nothing may
+        // start it as part of this run.
+        assert!(crate::db::task_groups::for_task(&db, 72).is_none());
+        // Its work still belongs on the trunk if it is ever run by hand.
+        assert_eq!(
+            crate::db::task_groups::trunk_for_task(&db, 72).as_deref(),
+            Some("trunk/feature/st")
+        );
+        // And the trunk must not land later either, however 72 ends up finishing.
+        set_task_status(&db, 72, "done");
+        assert!(finish_group_if_complete(&db, 72, &dir, &project_with_merge(&dir, 1)).is_none());
+        // Both sides of the failed merge still hold their commits.
+        assert!(branch_exists(&root, "feature/st"));
+        assert!(branch_exists(&root, "trunk/feature/st"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_task_branch(db: &DbPool, id: i64, branch: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET branch_name=?2 WHERE id=?1",
+                rusqlite::params![id, branch],
+            )
+            .unwrap();
+    }
+
+    /// A stopped run over one member, with `branch` recorded against it.
+    fn stopped_run(
+        db: &DbPool,
+        task_id: i64,
+        trunk: &str,
+        branch: &str,
+    ) -> crate::db::task_groups::TaskGroup {
+        seed_rows(db, task_id);
+        set_task_status(db, task_id, "done");
+        set_task_branch(db, task_id, branch);
+        let gid =
+            crate::db::task_groups::create(db, 1, trunk, "main", task_id, &[task_id]).unwrap();
+        crate::db::task_groups::set_status(db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+        crate::db::task_groups::get(db, gid).unwrap()
+    }
+
+    #[test]
+    fn remerging_lands_a_member_branch_that_can_now_merge() {
+        let root = repo("resume-remerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/r", "main"], &root));
+        commit_on(&root, "feature/r", "r.txt");
+        let db = test_db();
+        let group = stopped_run(&db, 80, "trunk/feature/r", "feature/r");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        assert!(
+            matches!(outcome, RunResumeOutcome::Ready { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "trunk/feature/r", "r.txt").is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_skips_a_member_whose_branch_was_already_cleaned_up() {
+        let root = repo("resume-gone");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on(&root, "feature/g", "g.txt");
+        // What a member that merged successfully leaves behind: its work on the trunk
+        // and no branch. Every real run has at least one of these by the time it stops.
+        assert!(git(&["checkout", "--quiet", "trunk/feature/g"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/g"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        assert!(git(&["branch", "-D", "feature/g"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 83, "trunk/feature/g", "feature/g");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // merge-base cannot answer for a ref that does not resolve, so this used to
+        // report a conflict on a branch that was gone and whose work had landed.
+        match outcome {
+            RunResumeOutcome::Ready { merged } => assert!(merged.is_empty(), "{merged:?}"),
+            other => panic!("expected readiness, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merging_a_branch_that_does_not_exist_says_so() {
+        let root = repo("merge-unknown");
+        let dir = root.to_string_lossy().to_string();
+
+        // Reported as a conflict, this sent the user to resolve one that never existed.
+        assert_eq!(
+            merge_task_branch("feature/never-was", "main", &dir),
+            Err(MergeRefusal::UnknownBranch)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_reports_a_branch_that_still_conflicts() {
+        let root = repo("resume-still");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/c", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/c", "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "-b", "feature/c"], &root));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 81, "trunk/feature/c", "feature/c");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // Carrying on into the same refusal would start the rest of the run against
+        // work that is still not on the trunk.
+        match outcome {
+            RunResumeOutcome::StillRefused { branch, .. } => assert_eq!(branch, "feature/c"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_is_a_no_op_when_the_user_merged_by_hand() {
+        let root = repo("resume-byhand");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/h", "main"], &root));
+        commit_on(&root, "feature/h", "h.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/h"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/h"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 82, "trunk/feature/h", "feature/h");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // The usual resolution. Reporting it as merged here would claim work this
+        // call did not do, and the toast counts what it reports.
+        match outcome {
+            RunResumeOutcome::Ready { merged } => assert!(merged.is_empty(), "{merged:?}"),
+            other => panic!("expected readiness, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_refused_merge_onto_the_base_branch_does_not_stop_a_run() {
+        // No merge is attempted here — the outcome under test is constructed — so
+        // the repo exists only to give the group a plausible trunk to name.
+        let root = repo("group-stop-base");
+        assert!(git(&["branch", "trunk/feature/sb", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 73);
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/sb", "main", 73, &[73]).unwrap();
+
+        // A task's own branch failing to reach the project's base branch is a
+        // different event: no member of the run was waiting on it.
+        let outcome = BranchCleanup::KeptMergeRefused {
+            branch: "feature/sb".into(),
+            base: "main".into(),
+            refusal: MergeRefusal::Conflict,
+        };
+        let stopped = stop_group_after_failed_merge(&db, None, 73, &outcome);
+
+        assert!(!stopped);
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_ACTIVE
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_conflicting_trunk_merge_keeps_the_trunk() {
+        let root = repo("group-conflict");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/k", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/k", "shared.txt", "trunk side\n");
+        commit_file(&root, "shared.txt", "main side\n");
+        let db = test_db();
+        seed_rows(&db, 61);
+        set_task_status(&db, 61, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/k", "main", 61, &[61]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 61, &dir, &project_with_merge(&dir, 1))
+            .expect("attempted");
+
+        // Losing a whole group's work to a conflict is the failure this exists to
+        // prevent: the trunk must survive for the user to resolve by hand.
+        assert!(
+            matches!(outcome, BranchCleanup::KeptMergeRefused { .. }),
+            "{outcome:?}"
+        );
+        assert!(branch_exists(&root, "trunk/feature/k"));
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_FAILED
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_member_that_is_not_the_target_does_not_land_the_trunk() {
+        let root = repo("group-nontarget");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/m", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/m", "some.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 62);
+        seed_rows(&db, 63);
+        set_task_status(&db, 62, "done");
+        set_task_status(&db, 63, "done");
+        // 63 is the target; 62 is a prerequisite that just finished.
+        crate::db::task_groups::create(&db, 1, "trunk/feature/m", "main", 63, &[62, 63]).unwrap();
+
+        assert!(finish_group_if_complete(&db, 62, &dir, &project(&dir)).is_none());
+
+        // A prerequisite finishing must not put the group's partial work on the base.
+        assert!(file_on(&root, "main", "some.txt").is_none());
+        assert!(branch_exists(&root, "trunk/feature/m"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_target_waits_for_every_member_before_landing() {
+        let root = repo("group-incomplete");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/w", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/w", "partial.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 64);
+        seed_rows(&db, 65);
+        set_task_status(&db, 64, "done");
+        // The target is done but a sibling is still in review.
+        set_task_status(&db, 65, "testing");
+        crate::db::task_groups::create(&db, 1, "trunk/feature/w", "main", 64, &[64, 65]).unwrap();
+
+        assert!(finish_group_if_complete(&db, 64, &dir, &project(&dir)).is_none());
+
+        // Landing now would put a sibling's unapproved work on the base branch.
+        assert!(file_on(&root, "main", "partial.txt").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_completing_does_nothing() {
+        let root = repo("group-none");
+        let dir = root.to_string_lossy().to_string();
+        let db = test_db();
+        seed_rows(&db, 66);
+        set_task_status(&db, 66, "done");
+
+        assert!(finish_group_if_complete(&db, 66, &dir, &project(&dir)).is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_landed_group_releases_its_tasks_so_they_can_run_again() {
+        let root = repo("group-release");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/rel", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/rel", "rel.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 67);
+        set_task_status(&db, 67, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/rel", "main", 67, &[67]).unwrap();
+
+        finish_group_if_complete(&db, 67, &dir, &project_with_merge(&dir, 1)).expect("should land");
+
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_COMPLETED
+        );
+        assert!(crate::db::task_groups::for_task(&db, 67).is_none());
+        // The assertion that distinguishes finish() from set_status(): membership
+        // has to be released, or UNIQUE(task_id) refuses to ever run this task in
+        // another chain. for_task alone cannot tell the two apart, because it
+        // filters on status either way.
+        assert!(
+            crate::db::task_groups::create(&db, 1, "trunk/feature/again", "main", 67, &[67])
+                .is_ok(),
+            "the task is still claimed by the group that already landed"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_revision_after_a_restart_keeps_its_worktree_and_its_uncommitted_work() {
         // This is the data-loss path. TASK_WORKTREES only records worktrees this
@@ -3172,6 +4249,16 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        let mut cmd = crate::child_env::command("git");
+        let out = cmd
+            .args(["rev-parse", rev])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     fn branch_exists(root: &Path, branch: &str) -> bool {
         git(
             &[
@@ -3286,6 +4373,106 @@ mod tests {
     }
 
     #[test]
+    fn one_lock_per_repository() {
+        let a = repo_lock("/repos/one");
+        let b = repo_lock("/repos/one");
+        let c = repo_lock("/repos/two");
+
+        // Same repo must share a lock, or the serialisation below does nothing.
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        // Different repos must not, or one project's merge blocks another's.
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+    }
+
+    #[test]
+    fn concurrent_merges_all_land_and_leave_the_user_where_they_were() {
+        let root = repo("merge-concurrent");
+        let dir = root.to_string_lossy().to_string();
+        let branches = ["feature/p1", "feature/p2", "feature/p3", "feature/p4"];
+        for (i, b) in branches.iter().enumerate() {
+            commit_on(&root, b, &format!("p{}.txt", i + 1));
+        }
+        assert!(git(&["checkout", "--quiet", "-b", "scratch"], &root));
+
+        // A wave of prerequisites finishing together, which is what raising
+        // max_concurrent above 1 produces.
+        let handles: Vec<_> = branches
+            .iter()
+            .map(|b| {
+                let (b, dir) = (b.to_string(), dir.clone());
+                std::thread::spawn(move || merge_task_branch(&b, "main", &dir))
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert!(
+            results.iter().all(|r| r == &Ok(())),
+            "every merge should succeed: {:?}",
+            results
+        );
+        // Each file reaching main is the proof no merge was lost or aborted.
+        for i in 1..=branches.len() {
+            let f = format!("p{}.txt", i);
+            assert!(
+                file_on(&root, "main", &f).is_some(),
+                "{} did not reach main",
+                f
+            );
+        }
+        // Unserialised, a thread reads the branch another has temporarily checked
+        // out, so nobody restores the branch the user was actually on.
+        assert_eq!(current_branch(&dir).as_deref(), Some("scratch"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merge_ignores_an_untracked_file() {
+        let root = repo("merge-untracked");
+        commit_on(&root, "feature/u", "u.txt");
+        // What Finder leaves behind in any directory it displays. Treating it as a
+        // dirty tree refused every merge in the repository, which broke landing work
+        // for a reason no user could see.
+        std::fs::write(root.join(".DS_Store"), "junk\n").unwrap();
+        let dir = root.to_string_lossy().to_string();
+
+        assert_eq!(merge_task_branch("feature/u", "main", &dir), Ok(()));
+        assert!(file_on(&root, "main", "u.txt").is_some());
+        // Still untracked and still there: ignoring it must not mean absorbing it.
+        assert!(root.join(".DS_Store").exists());
+        assert!(file_on(&root, "main", ".DS_Store").is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_task_lands_on_the_trunk_despite_an_untracked_file() {
+        let root = repo("group-untracked");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on(&root, "feature/g", "g.txt");
+        std::fs::write(root.join(".DS_Store"), "junk\n").unwrap();
+
+        // The path the whole chain depends on: without the merge, the next task in
+        // the group branches from a trunk that never received its predecessor's work.
+        let outcome = cleanup_task_branch_in(
+            &task(9101, "feature/g"),
+            &dir,
+            &project_with_merge(&dir, 0),
+            Some("trunk/feature/g"),
+        );
+
+        assert!(
+            matches!(outcome, BranchCleanup::Merged { .. }),
+            "expected a merge onto the trunk, got {:?}",
+            outcome
+        );
+        assert!(file_on(&root, "trunk/feature/g", "g.txt").is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn merge_rolls_back_a_conflict_and_leaves_base_untouched() {
         let root = repo("merge-conflict");
         // Both branches change the same line, so the merge cannot succeed.
@@ -3315,10 +4502,11 @@ mod tests {
         commit_on(&root, "feature/land", "land.txt");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(
+        let outcome = cleanup_task_branch_in(
             &task(9003, "feature/land"),
             &dir,
             &project_with_merge(&dir, 1),
+            None,
         );
 
         assert_eq!(
@@ -3344,8 +4532,12 @@ mod tests {
         commit_file(&root, "shared.txt", "main side\n");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome =
-            cleanup_task_branch(&task(9004, "feature/x"), &dir, &project_with_merge(&dir, 1));
+        let outcome = cleanup_task_branch_in(
+            &task(9004, "feature/x"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            None,
+        );
 
         assert_eq!(
             outcome,
@@ -3366,7 +4558,8 @@ mod tests {
         commit_on(&root, "feature/keep-me", "keep.txt");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(&task(9001, "feature/keep-me"), &dir, &project(&dir));
+        let outcome =
+            cleanup_task_branch_in(&task(9001, "feature/keep-me"), &dir, &project(&dir), None);
 
         assert_eq!(
             outcome,
@@ -3395,7 +4588,8 @@ mod tests {
         ));
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(&task(9002, "feature/done"), &dir, &project(&dir));
+        let outcome =
+            cleanup_task_branch_in(&task(9002, "feature/done"), &dir, &project(&dir), None);
 
         assert_eq!(outcome, BranchCleanup::Deleted);
         // The commits live on main now, so tidying the branch away loses nothing.
