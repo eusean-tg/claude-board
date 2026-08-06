@@ -65,6 +65,7 @@ export default function Board({
   onReviewTask,
   onViewDetail,
   onReorderTasks,
+  onRunStopped,
 }) {
   const { t } = useTranslation();
   const [draggedTask, setDraggedTask] = useState(null);
@@ -366,6 +367,7 @@ export default function Board({
                 onViewDetail={onViewDetail}
                 onReorder={handleReorder}
                 onDepDrop={handleDepDrop}
+                onRunStopped={onRunStopped}
                 isMobile
               />
             </div>
@@ -392,6 +394,7 @@ export default function Board({
                   onViewDetail={onViewDetail}
                   onReorder={handleReorder}
                   onDepDrop={handleDepDrop}
+                  onRunStopped={onRunStopped}
                 />
               ))}
             </div>

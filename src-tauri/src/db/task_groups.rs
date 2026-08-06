@@ -162,6 +162,23 @@ pub fn trunks_by_task(
     out
 }
 
+/// The stopped run a task belongs to, if any.
+///
+/// Deliberately not a status parameter on [`for_task`]: the two callers want opposite
+/// things — one asks "is this run live", the other "is this run waiting for me" — and
+/// a bool at the call site reads as neither.
+pub fn stopped_for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT g.* FROM task_groups g
+         JOIN task_group_members m ON m.group_id = g.id
+         WHERE m.task_id = ?1 AND g.status = 'stopped'",
+        params![task_id],
+        row_to_group,
+    )
+    .ok()
+}
+
 /// The trunk a task's work belongs on, whether or not its run is still live.
 ///
 /// Branch cleanup needs this rather than [`for_task`]: a member still running when
@@ -418,6 +435,23 @@ mod tests {
         // branch that is gone.
         assert!(!map.contains_key(&done_member));
         assert_eq!(get(&db, live).unwrap().status, STATUS_ACTIVE);
+    }
+
+    #[test]
+    fn stopped_for_task_finds_only_a_stopped_run() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let id = create(&db, 1, "trunk/s", "main", a, &[a]).unwrap();
+
+        // An active run is not resolvable: there is nothing waiting on a person.
+        assert!(stopped_for_task(&db, a).is_none());
+
+        set_status(&db, id, STATUS_STOPPED).unwrap();
+        assert_eq!(stopped_for_task(&db, a).map(|g| g.id), Some(id));
+
+        // A closed run has released its members, so there is nothing to resume.
+        finish(&db, id, STATUS_FAILED).unwrap();
+        assert!(stopped_for_task(&db, a).is_none());
     }
 
     #[test]

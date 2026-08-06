@@ -385,6 +385,8 @@ export const api = {
         // ─── Dependency-ordered runs ───
         planPrerequisites: (id) => tauriCall('plan_prerequisites', { id }),
         startTaskWithPrerequisites: (id) => tauriCall('start_task_with_prerequisites', { id, mcpPort: MCP_PORT }),
+        resumeStoppedRun: (id) => tauriCall('resume_stopped_run', { taskId: id }),
+        abandonRun: (id) => tauriCall('abandon_run', { taskId: id }),
         // ─── Blockers ───
         getBlocker: (taskId) => tauriCall('get_blocker', { taskId }),
         taskBlockers: (taskId) => tauriCall('task_blockers', { taskId }),

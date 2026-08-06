@@ -149,6 +149,17 @@ export default {
   'prerequisites.confirm': 'Run {count} tasks',
   'prerequisites.starting': 'Starting...',
   'prerequisites.cancel': 'Cancel',
+  'runStopped.title': 'This run stopped',
+  'runStopped.body':
+    "A task's work could not be merged into the shared branch, so the tasks after it were not started. Merge it by hand, then carry the run on — or give up on the run and free its tasks.",
+  'runStopped.trunk': 'Shared branch:',
+  'runStopped.resume': 'Carry on',
+  'runStopped.resuming': 'Merging...',
+  'runStopped.abandon': 'Abandon run',
+  'runStopped.abandonConfirm': 'Abandon — release the tasks',
+  'runStopped.cancel': 'Close',
+  'toast.runResumed': 'Run resumed — {count} task(s) started',
+  'toast.runAbandoned': 'Run abandoned. {trunk} still holds its work.',
   'toast.prerequisitesStarted': 'Started {count} tasks',
 
   // ─── Discussion ───

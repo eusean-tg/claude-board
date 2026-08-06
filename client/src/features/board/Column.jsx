@@ -17,6 +17,7 @@ const Column = memo(function Column({
   onReviewTask,
   onViewDetail,
   onDepDrop,
+  onRunStopped,
   isMobile,
 }) {
   const { t } = useTranslation();
@@ -120,6 +121,7 @@ const Column = memo(function Column({
               onReview={() => onReviewTask(task)}
               onViewDetail={() => onViewDetail(task)}
               onDepDrop={onDepDrop}
+              onRunStopped={onRunStopped}
             />
           </div>
         ))}

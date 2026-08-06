@@ -170,6 +170,7 @@ const TaskCard = memo(function TaskCard({
   onReview,
   onViewDetail,
   onDepDrop,
+  onRunStopped,
   draggedTask,
 }) {
   const { t } = useTranslation();
@@ -315,21 +316,30 @@ const TaskCard = memo(function TaskCard({
             {/* A stopped run is the only thing on a card that needs a person and
                 says nothing about the task's own status: every task in it reports
                 something that looks fine. Red and named, or it reads as routine. */}
-            {task.trunk_branch && (
-              <span
-                className={`flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full ${
-                  task.run_stopped ? 'text-red-400 bg-red-500/10' : 'text-surface-400 bg-surface-700/50'
-                }`}
-                title={task.run_stopped ? t('card.runStopped', { trunk: task.trunk_branch }) : t('card.sharedBranch')}
-              >
-                {task.run_stopped ? (
+            {task.trunk_branch &&
+              (task.run_stopped ? (
+                // A button, because a stopped run has something to do about it. The
+                // click must not also open the task detail underneath.
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRunStopped?.(task);
+                  }}
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full text-red-400 bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                  title={t('card.runStopped', { trunk: task.trunk_branch })}
+                >
                   <AlertTriangle size={10} className="flex-shrink-0" />
-                ) : (
+                  <span className="truncate">{t('card.runStoppedShort')}</span>
+                </button>
+              ) : (
+                <span
+                  className="flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded max-w-full text-surface-400 bg-surface-700/50"
+                  title={t('card.sharedBranch')}
+                >
                   <GitBranch size={10} className="flex-shrink-0" />
-                )}
-                <span className="truncate">{task.run_stopped ? t('card.runStoppedShort') : task.trunk_branch}</span>
-              </span>
-            )}
+                  <span className="truncate">{task.trunk_branch}</span>
+                </span>
+              ))}
             {/* Ahead of the running marker: a blocked task is waiting on a person,
                 and it pulses because it is the one state that costs time silently. */}
             {task.status === 'blocked' && (

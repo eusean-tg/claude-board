@@ -15,6 +15,7 @@ import WebhooksModal from '../features/webhooks/WebhooksModal';
 import RolesModal from '../features/roles/RolesModal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import PrerequisiteModal from '../features/board/PrerequisiteModal';
+import RunStoppedModal from '../features/board/RunStoppedModal';
 import Toast from '../components/Toast';
 import TerminalBottomPanel from './TerminalBottomPanel';
 import { VoiceAssistantProvider } from '../features/voice/VoiceAssistantProvider';
@@ -40,6 +41,7 @@ export default function AppLayout({
   toasts,
   confirm,
   prerequisites,
+  runStopped,
   templates,
   roles,
   modals,
@@ -115,6 +117,7 @@ export default function AppLayout({
                 onReviewTask={taskActions.onReview}
                 onViewDetail={(task) => openModal('detail', task)}
                 onReorderTasks={taskActions.onReorderTasks}
+                onRunStopped={taskActions.onRunStopped}
               />
             ) : (
               <Dashboard
@@ -273,6 +276,7 @@ export default function AppLayout({
       )}
       {confirm && <ConfirmDialog {...confirm} />}
       {prerequisites && <PrerequisiteModal {...prerequisites} />}
+      {runStopped && <RunStoppedModal {...runStopped} />}
       <Toast toasts={toasts} />
       {/* Voice assistant temporarily disabled
       <VoiceAssistantProvider

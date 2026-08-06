@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 
 vi.mock('../../../i18n/I18nProvider', () => ({
   useTranslation: () => ({ t: (k, vars) => (vars ? `${k} ${JSON.stringify(vars)}` : k) }),
@@ -72,6 +72,27 @@ describe('TaskCard dependency state', () => {
 
     // The instruction has to reach the user somewhere: the label is too small for it.
     expect(screen.getByTitle(/"trunk":"trunk\/feature\/x"/)).toBeInTheDocument();
+  });
+
+  it('opens the resolution panel from the marker', () => {
+    const onRunStopped = vi.fn();
+    render(
+      <TaskCard task={card({ trunk_branch: 'trunk/feature/x', run_stopped: true })} onRunStopped={onRunStopped} />,
+    );
+
+    fireEvent.click(screen.getByText('card.runStoppedShort'));
+
+    expect(onRunStopped).toHaveBeenCalled();
+  });
+
+  it('leaves a healthy run inert', () => {
+    const onRunStopped = vi.fn();
+    render(<TaskCard task={card({ trunk_branch: 'trunk/feature/x' })} onRunStopped={onRunStopped} />);
+
+    fireEvent.click(screen.getByText('trunk/feature/x'));
+
+    // Nothing to resolve, so the marker must not offer to resolve it.
+    expect(onRunStopped).not.toHaveBeenCalled();
   });
 
   it('shows nothing about branches for an ungrouped task', () => {

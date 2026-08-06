@@ -270,6 +270,81 @@ pub fn start_task_with_prerequisites(
     }))
 }
 
+/// The stopped run a task belongs to, or a refusal naming why there is nothing to do.
+///
+/// Both resolution commands go through this. The buttons are only rendered for a
+/// stopped run, so arriving here without one means the board is stale — worth saying
+/// rather than resolving nothing and reporting success.
+fn resolvable_run(db: &db::DbPool, task_id: i64) -> Result<db::task_groups::TaskGroup, String> {
+    db::task_groups::stopped_for_task(db, task_id)
+        .ok_or_else(|| "This task is not part of a stopped run".to_string())
+}
+
+/// Carry a stopped run on from where it stopped.
+///
+/// Merges whatever is still missing from the trunk, then returns the run to active and
+/// starts the members that are ready. Works whether the user merged the refused branch
+/// by hand or fixed the cause and wants another attempt.
+///
+/// The run stays stopped if a branch still cannot merge. Carrying on into the same
+/// refusal would start the rest of the chain against work that is still not there.
+#[tauri::command]
+pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Value, String> {
+    let db = db::get_db();
+    let group = resolvable_run(&db, task_id)?;
+    let project = pq::get_by_id(&db, group.project_id).ok_or("Project not found")?;
+
+    match runner::remerge_stopped_members(&db, &group, &project.working_dir) {
+        runner::RunResumeOutcome::StillRefused { branch, refusal } => Err(format!(
+            "{} still cannot be merged into {}: {}",
+            branch,
+            group.trunk_branch,
+            refusal.reason()
+        )),
+        runner::RunResumeOutcome::Ready { merged } => {
+            db::task_groups::set_status(&db, group.id, db::task_groups::STATUS_ACTIVE)
+                .map_err(|e| e.to_string())?;
+            let members = db::task_groups::members(&db, group.id);
+            queue::start_group_members(&db, &app, group.project_id, group.id);
+            let started: Vec<i64> = members
+                .into_iter()
+                .filter(|id| runner::is_running(*id) || runner::is_starting(*id))
+                .collect();
+            activity::add(
+                &db,
+                group.project_id,
+                Some(task_id),
+                "run_resumed",
+                &format!("Dependency run resumed on {}", group.trunk_branch),
+                None,
+            );
+            app.emit("task:updated", &serde_json::json!({"resumed": group.id}))
+                .ok();
+            Ok(serde_json::json!({"resumed": true, "merged": merged, "started": started}))
+        }
+    }
+}
+
+/// Give up on a stopped run, releasing its tasks so they can run in another.
+///
+/// The trunk is left alone. It holds whatever did merge, and deleting it here would
+/// destroy the only copy of that work.
+#[tauri::command]
+pub fn abandon_run(task_id: i64) -> Result<serde_json::Value, String> {
+    let db = db::get_db();
+    let group = resolvable_run(&db, task_id)?;
+    db::task_groups::abandon_stopped(&db, &[task_id]);
+    activity::add(
+        &db,
+        group.project_id,
+        Some(task_id),
+        "run_abandoned",
+        &format!("Dependency run abandoned; {} kept", group.trunk_branch),
+        None,
+    );
+    Ok(serde_json::json!({"abandoned": true, "trunk": group.trunk_branch}))
+}
+
 /// The waves that would run for a task, for the confirmation prompt.
 #[tauri::command]
 pub fn plan_prerequisites(id: i64) -> Vec<Vec<tq::Task>> {
@@ -1084,6 +1159,23 @@ mod tests {
         )
         .unwrap();
         Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn resolving_a_task_that_is_not_in_a_stopped_run_is_refused() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+
+        // Nothing to resolve, and no run to name. Reporting success here would tell
+        // the user a stopped run had been carried on when none existed.
+        assert!(resolvable_run(&db, a).is_err());
+
+        let gid = db::task_groups::create(&db, 1, "trunk/x", "main", a, &[a]).unwrap();
+        // An active run is not resolvable either: its members are still working.
+        assert!(resolvable_run(&db, a).is_err());
+
+        db::task_groups::set_status(&db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+        assert_eq!(resolvable_run(&db, a).map(|g| g.id).ok(), Some(gid));
     }
 
     fn seed_task(db: &db::DbPool, title: &str) -> i64 {

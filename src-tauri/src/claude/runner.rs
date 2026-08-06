@@ -626,7 +626,7 @@ pub enum MergeRefusal {
 }
 
 impl MergeRefusal {
-    fn reason(&self) -> &'static str {
+    pub(crate) fn reason(&self) -> &'static str {
         match self {
             Self::DirtyWorkingTree => "the working directory has uncommitted changes",
             Self::CannotCheckoutBase => "the base branch could not be checked out",
@@ -838,6 +838,67 @@ pub fn finish_group_if_complete(
         log::error!("could not close group {}: {}", group.id, e);
     }
     Some(outcome)
+}
+
+/// What a resume attempt found.
+#[derive(Debug)]
+pub enum RunResumeOutcome {
+    /// Every member's committed work is on the trunk. The run can carry on.
+    Ready { merged: Vec<String> },
+    /// A branch still cannot be merged, so the run stays stopped.
+    StillRefused {
+        branch: String,
+        refusal: MergeRefusal,
+    },
+}
+
+/// Put every member's committed work on the trunk, so a stopped run can carry on.
+///
+/// A member already on the trunk is skipped rather than merged again: the usual way
+/// out of a stopped run is the user merging by hand, and reporting that as work this
+/// call performed would claim something it did not do.
+///
+/// Stops at the first branch that still cannot merge. Carrying on past it would start
+/// the rest of the run against work that is still not there, which is the whole thing
+/// stopping the run prevented.
+pub fn remerge_stopped_members(
+    db: &DbPool,
+    group: &crate::db::task_groups::TaskGroup,
+    working_dir: &str,
+) -> RunResumeOutcome {
+    let mut merged = Vec::new();
+    for id in crate::db::task_groups::members(db, group.id) {
+        let Some(task) = tasks::get_by_id(db, id) else {
+            continue;
+        };
+        let Some(branch) = task.branch_name.as_deref().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if branch == group.trunk_branch {
+            continue;
+        }
+        if branch_is_merged_into(branch, &group.trunk_branch, working_dir) {
+            continue;
+        }
+        match merge_task_branch(branch, &group.trunk_branch, working_dir) {
+            Ok(()) => {
+                log::info!(
+                    "Resuming run {}: merged {} into {}",
+                    group.id,
+                    branch,
+                    group.trunk_branch
+                );
+                merged.push(branch.to_string());
+            }
+            Err(refusal) => {
+                return RunResumeOutcome::StillRefused {
+                    branch: branch.to_string(),
+                    refusal,
+                }
+            }
+        }
+    }
+    RunResumeOutcome::Ready { merged }
 }
 
 /// Stop a run whose member could not put its work on the trunk.
@@ -3562,6 +3623,97 @@ mod tests {
         // Both sides of the failed merge still hold their commits.
         assert!(branch_exists(&root, "feature/st"));
         assert!(branch_exists(&root, "trunk/feature/st"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_task_branch(db: &DbPool, id: i64, branch: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET branch_name=?2 WHERE id=?1",
+                rusqlite::params![id, branch],
+            )
+            .unwrap();
+    }
+
+    /// A stopped run over one member, with `branch` recorded against it.
+    fn stopped_run(
+        db: &DbPool,
+        task_id: i64,
+        trunk: &str,
+        branch: &str,
+    ) -> crate::db::task_groups::TaskGroup {
+        seed_rows(db, task_id);
+        set_task_status(db, task_id, "done");
+        set_task_branch(db, task_id, branch);
+        let gid =
+            crate::db::task_groups::create(db, 1, trunk, "main", task_id, &[task_id]).unwrap();
+        crate::db::task_groups::set_status(db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+        crate::db::task_groups::get(db, gid).unwrap()
+    }
+
+    #[test]
+    fn remerging_lands_a_member_branch_that_can_now_merge() {
+        let root = repo("resume-remerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/r", "main"], &root));
+        commit_on(&root, "feature/r", "r.txt");
+        let db = test_db();
+        let group = stopped_run(&db, 80, "trunk/feature/r", "feature/r");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        assert!(
+            matches!(outcome, RunResumeOutcome::Ready { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "trunk/feature/r", "r.txt").is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_reports_a_branch_that_still_conflicts() {
+        let root = repo("resume-still");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/c", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/c", "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "-b", "feature/c"], &root));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 81, "trunk/feature/c", "feature/c");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // Carrying on into the same refusal would start the rest of the run against
+        // work that is still not on the trunk.
+        match outcome {
+            RunResumeOutcome::StillRefused { branch, .. } => assert_eq!(branch, "feature/c"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_is_a_no_op_when_the_user_merged_by_hand() {
+        let root = repo("resume-byhand");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/h", "main"], &root));
+        commit_on(&root, "feature/h", "h.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/h"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/h"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 82, "trunk/feature/h", "feature/h");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // The usual resolution. Reporting it as merged here would claim work this
+        // call did not do, and the toast counts what it reports.
+        match outcome {
+            RunResumeOutcome::Ready { merged } => assert!(merged.is_empty(), "{merged:?}"),
+            other => panic!("expected readiness, got {other:?}"),
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

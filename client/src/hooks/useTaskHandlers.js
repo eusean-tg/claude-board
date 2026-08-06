@@ -12,6 +12,7 @@ export function useTaskHandlers({
   t,
   setConfirm,
   setPrerequisites,
+  setRunStopped,
   terminal,
   setSelectedTask,
   setActivePanel,
@@ -252,8 +253,35 @@ export function useTaskHandlers({
     [setTasks],
   );
 
+  // Opens the resolution panel for a stopped run. Refreshing the board afterwards is
+  // what clears the markers from every card in the run, not just the one clicked.
+  const onRunStopped = useCallback(
+    (task) => {
+      setRunStopped({
+        task,
+        onClose: () => setRunStopped(null),
+        onResolved: async ({ kind, result }) => {
+          setRunStopped(null);
+          if (kind === 'resumed') {
+            addToast(t('toast.runResumed', { count: result?.started?.length ?? 0 }), 'success');
+          } else {
+            addToast(t('toast.runAbandoned', { trunk: result?.trunk ?? '' }), 'success');
+          }
+          try {
+            setTasks(await api.getTasks(task.project_id));
+          } catch {
+            // The panel is closed and the toast is shown; a stale marker is a
+            // cosmetic problem the next refresh fixes.
+          }
+        },
+      });
+    },
+    [setRunStopped, addToast, t, setTasks],
+  );
+
   return {
     onStatusChange,
+    onRunStopped,
     onCreate,
     onUpdate,
     onDelete,
