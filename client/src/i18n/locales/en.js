@@ -130,6 +130,16 @@ export default {
   'board.depDialogDesc': 'Choose the dependency direction between these tasks:',
   'board.dependsOn': 'depends on',
 
+  // ─── Blockers ───
+  'blocker.send': 'Send answer',
+  'blocker.sending': 'Sending...',
+  'blocker.dismiss': 'Dismiss without answering',
+  'blocker.somethingElse': 'Something else',
+  'blocker.addContext': 'Add context for this choice',
+  'blocker.escapePlaceholder': 'Describe what you want instead',
+  'blocker.answerPlaceholder': 'Type your answer',
+  'blocker.waiting': 'Waiting for your answer',
+
   // ─── Task Card ───
   'card.startWorking': 'Start Working',
   'card.sendToTesting': 'Send to Testing',

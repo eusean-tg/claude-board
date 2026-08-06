@@ -382,6 +382,12 @@ export const api = {
             phaseTitle,
             autoStart: autoStart ?? true,
           }),
+        // ─── Blockers ───
+        getBlocker: (taskId) => tauriCall('get_blocker', { taskId }),
+        taskBlockers: (taskId) => tauriCall('task_blockers', { taskId }),
+        answerBlocker: (blockerId, responses) =>
+          tauriCall('answer_blocker', { blockerId, responses, mcpPort: MCP_PORT }),
+        cancelBlocker: (blockerId) => tauriCall('cancel_blocker', { blockerId }),
         // ─── Artifacts ───
         listArtifacts: (projectId) => tauriCall('list_artifacts', { projectId }),
         getArtifact: (id) => tauriCall('get_artifact', { id }),

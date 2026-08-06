@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { COLUMNS, TASK_STATUSES, STATUS_DOT } from '../constants';
 import en from '../../i18n/locales/en';
+import { STATUS_COLORS } from '../../features/tasks/taskDetailHelpers';
 
 // Every one of these lists is a separate hardcoded copy of the status set, and a
 // status missing from any of them fails silently: the board drops the task from
@@ -28,6 +29,12 @@ describe('task status lists', () => {
   it('gives every status a dot colour', () => {
     for (const id of TASK_STATUSES) {
       expect(STATUS_DOT[id], `missing STATUS_DOT.${id}`).toBeTruthy();
+    }
+  });
+
+  it('gives every status a text colour', () => {
+    for (const id of TASK_STATUSES) {
+      expect(STATUS_COLORS[id], `missing STATUS_COLORS.${id}`).toBeTruthy();
     }
   });
 });

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X,
   GitCommit,
@@ -30,6 +30,8 @@ import { TaskAttachmentsTab } from './TaskAttachmentsTab';
 import ArtifactPicker from '../artifacts/ArtifactPicker';
 import { TaskRevisionsTab } from './TaskRevisionsTab';
 import { TaskDependenciesTab } from './TaskDependenciesTab';
+import BlockerPanel from '../board/BlockerPanel';
+import { tauriListen } from '../../lib/tauriEvents';
 
 export default function TaskDetailModal({ task, onClose, onStatusChange }) {
   const { t } = useTranslation();
@@ -44,6 +46,46 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
   const [allTasks, setAllTasks] = useState([]);
   const [addDepId, setAddDepId] = useState('');
   const [addDepDirection, setAddDepDirection] = useState('parent'); // parent = "this depends on X"
+  const [blocker, setBlocker] = useState(null);
+
+  const loadBlocker = useCallback(() => {
+    api
+      .getBlocker(task.id)
+      .then(setBlocker)
+      .catch(() => setBlocker(null));
+  }, [task.id]);
+
+  useEffect(() => {
+    loadBlocker();
+    // The agent can raise a question while this modal is open, and the board is
+    // event-driven with no polling.
+    return tauriListen('blocker:raised', (payload) => {
+      if (payload?.taskId === task.id) loadBlocker();
+    });
+  }, [task.id, loadBlocker]);
+
+  const answerBlocker = async (responses) => {
+    try {
+      const outcome = await api.answerBlocker(blocker.id, responses);
+      setBlocker(null);
+      // The status moved with the answer — to in_progress when the agent picked it
+      // up, or when it was restarted with it.
+      if (outcome?.resumed_in_session || !outcome?.needs_restart) {
+        setCurrentStatus('in_progress');
+      }
+    } catch {
+      // notifyError has already surfaced it; leave the panel up to try again.
+    }
+  };
+
+  const cancelBlocker = async () => {
+    try {
+      await api.cancelBlocker(blocker.id);
+      setBlocker(null);
+    } catch {
+      /* surfaced by notifyError */
+    }
+  };
 
   useEffect(() => {
     api
@@ -182,6 +224,15 @@ export default function TaskDetailModal({ task, onClose, onStatusChange }) {
             );
           })}
         </div>
+
+        {/* Above the tabs and outside the scroll area on purpose: an agent waiting
+            on an answer is the one state that must not be missed, whichever tab
+            the user happens to be on. */}
+        {blocker ? (
+          <div className="px-5 pt-3 flex-shrink-0">
+            <BlockerPanel blocker={blocker} onAnswer={answerBlocker} onCancel={cancelBlocker} />
+          </div>
+        ) : null}
 
         {/* Tab content — scrollable */}
         <div className="flex-1 overflow-y-auto">

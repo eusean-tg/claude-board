@@ -15,6 +15,7 @@ import {
   ArrowRight,
   AlertTriangle,
   FlaskConical,
+  HelpCircle,
 } from 'lucide-react';
 import { formatDuration, formatTokens } from '../../lib/formatters';
 import {
@@ -297,7 +298,15 @@ const TaskCard = memo(function TaskCard({
                 {t('status.testing')}
               </span>
             )}
-            {task.is_running && task.status !== 'testing' && (
+            {/* Ahead of the running marker: a blocked task is waiting on a person,
+                and it pulses because it is the one state that costs time silently. */}
+            {task.status === 'blocked' && (
+              <span className="flex items-center gap-1 text-[10px] font-medium text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded">
+                <HelpCircle size={10} className="animate-pulse" />
+                {t('blocker.waiting')}
+              </span>
+            )}
+            {task.is_running && task.status !== 'testing' && task.status !== 'blocked' && (
               <span className="flex items-center gap-1 text-[10px] font-medium text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
                 <Activity size={10} className="animate-pulse" />
                 {t('status.running')}

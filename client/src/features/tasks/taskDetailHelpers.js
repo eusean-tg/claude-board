@@ -1,3 +1,5 @@
+import { COLUMNS } from '../../lib/constants';
+
 export const TYPE_COLORS = {
   feature: 'bg-blue-500/15 text-blue-400',
   bugfix: 'bg-red-500/15 text-red-400',
@@ -7,13 +9,10 @@ export const TYPE_COLORS = {
   chore: 'bg-surface-500/15 text-surface-400',
 };
 
-export const STATUS_COLORS = {
-  backlog: 'text-surface-400',
-  in_progress: 'text-amber-400',
-  testing: 'text-claude',
-  done: 'text-emerald-400',
-  failed: 'text-red-400',
-};
+// Derived from COLUMNS rather than repeated: this list had drifted, missing both
+// awaiting_approval and blocked, and a status absent from it renders with an
+// undefined class rather than erroring.
+export const STATUS_COLORS = Object.fromEntries(COLUMNS.map((c) => [c.id, c.color]));
 
 export function getDiffLineClass(line) {
   if (line.startsWith('+++') || line.startsWith('---')) return 'text-surface-300 font-semibold px-4 py-0';
