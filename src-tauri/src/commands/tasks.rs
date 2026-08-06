@@ -338,6 +338,12 @@ fn execute_done_side_effects(db: &crate::db::DbPool, app: &AppHandle, id: i64, t
         // Cleanup uses project root (manages worktrees and branches)
         let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project, db);
         runner::report_branch_cleanup(cleanup, id, db, app);
+        // Approving the group's target task is what lands its trunk on the base.
+        if let Some(landed) =
+            runner::finish_group_if_complete(db, id, &project.working_dir, &project)
+        {
+            runner::report_branch_cleanup(landed, id, db, app);
+        }
 
         // Auto-close linked GitHub issue
         if project.github_sync_enabled.unwrap_or(0) == 1 {

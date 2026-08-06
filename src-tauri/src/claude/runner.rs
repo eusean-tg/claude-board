@@ -730,6 +730,101 @@ fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), 
     }
 }
 
+/// Land a group's trunk on its base branch, if the task that just finished was the
+/// one the group exists to deliver and every member has been approved.
+///
+/// Returns `None` when there is nothing to do — the task is not a group target, or
+/// members remain. The result is a [`BranchCleanup`] so the caller can pass it to
+/// [`report_branch_cleanup`] and have the landing show up in the task's log.
+///
+/// Members must all be `done` rather than merely finished running. Their work is
+/// already on the trunk by then, so landing early would move a sibling's unapproved
+/// changes onto the base branch.
+pub fn finish_group_if_complete(
+    db: &DbPool,
+    task_id: i64,
+    working_dir: &str,
+    project: &projects::Project,
+) -> Option<BranchCleanup> {
+    let group = crate::db::task_groups::for_task(db, task_id)?;
+    if group.target_task_id != task_id {
+        // A prerequisite finishing leaves its work on the trunk and nothing else.
+        return None;
+    }
+    let members = crate::db::task_groups::members(db, group.id);
+    let all_done = members.iter().all(|id| {
+        tasks::get_by_id(db, *id)
+            .and_then(|t| t.status)
+            .map(|s| s == crate::claude::state_machine::TaskStatus::Done.as_str())
+            .unwrap_or(false)
+    });
+    if !all_done {
+        return None;
+    }
+
+    let base = if group.base_branch.is_empty() {
+        project
+            .pr_base_branch
+            .as_deref()
+            .unwrap_or("main")
+            .to_string()
+    } else {
+        group.base_branch.clone()
+    };
+    let outcome = land_trunk(working_dir, &group.trunk_branch, &base);
+
+    // finish() rather than set_status(): it releases the members too. The trunk is
+    // gone on success, and on refusal it survives for the user to merge by hand —
+    // either way leaving the tasks claimed by this group would refuse to ever run
+    // them in another chain.
+    let status = match &outcome {
+        BranchCleanup::Merged { .. } => crate::db::task_groups::STATUS_COMPLETED,
+        _ => crate::db::task_groups::STATUS_FAILED,
+    };
+    if let Err(e) = crate::db::task_groups::finish(db, group.id, status) {
+        log::error!("could not close group {}: {}", group.id, e);
+    }
+    Some(outcome)
+}
+
+/// Merge `trunk` into `base` and delete the trunk once its commits are reachable.
+fn land_trunk(working_dir: &str, trunk: &str, base: &str) -> BranchCleanup {
+    match merge_task_branch(trunk, base, working_dir) {
+        Ok(()) => {
+            // Reachability is what makes the delete safe, exactly as for a task
+            // branch. Do not shortcut it because the merge reported success.
+            if branch_is_merged_into(trunk, base, working_dir) {
+                let mut cmd = crate::child_env::command("git");
+                cmd.args(["branch", "-D", trunk])
+                    .current_dir(working_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(target_os = "windows")]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                cmd.output().ok();
+            }
+            log::info!("Landed group trunk {} on {}", trunk, base);
+            BranchCleanup::Merged {
+                branch: trunk.to_string(),
+                base: base.to_string(),
+            }
+        }
+        Err(refusal) => {
+            log::warn!(
+                "Keeping group trunk {}: it could not be merged into {} ({}). Merge it by hand to land the group's work.",
+                trunk,
+                base,
+                refusal.reason()
+            );
+            BranchCleanup::KeptMergeRefused {
+                branch: trunk.to_string(),
+                base: base.to_string(),
+                refusal,
+            }
+        }
+    }
+}
+
 /// Delete feature branch (local + remote) and worktree after task completion.
 /// Skips if auto_pr is enabled (branch needed for open PR).
 /// Only acts if task has a branch, the branch is not the base branch, and the
@@ -1709,6 +1804,13 @@ fn handle_process_lifecycle(
                         let cleanup =
                             cleanup_task_branch(&after_pr, project_working_dir, &proj, db);
                         report_branch_cleanup(cleanup, task_id, db, app);
+                        // The task's work is on the trunk now; if it was the one the
+                        // group exists to deliver, the trunk goes to the base branch.
+                        if let Some(landed) =
+                            finish_group_if_complete(db, task_id, project_working_dir, &proj)
+                        {
+                            report_branch_cleanup(landed, task_id, db, app);
+                        }
 
                         if proj.github_sync_enabled.unwrap_or(0) == 1 {
                             if let Some(issue_num) = done_task.github_issue_number {
@@ -2547,6 +2649,14 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     &db,
                                 );
                                 report_branch_cleanup(cleanup, task_id, &db, &app);
+                                if let Some(landed) = finish_group_if_complete(
+                                    &db,
+                                    task_id,
+                                    &project_working_dir,
+                                    &proj,
+                                ) {
+                                    report_branch_cleanup(landed, task_id, &db, &app);
+                                }
 
                                 // Auto-close linked GitHub issue
                                 if proj.github_sync_enabled.unwrap_or(0) == 1 {
@@ -3181,6 +3291,153 @@ mod tests {
         // integration branch with it.
         assert_eq!(outcome, BranchCleanup::Skipped);
         assert!(branch_exists(&root, "trunk/feature/s"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_task_status(db: &DbPool, id: i64, status: &str) {
+        db.lock()
+            .execute(
+                "UPDATE tasks SET status=?2 WHERE id=?1",
+                rusqlite::params![id, status],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_target_task_lands_the_trunk_on_base() {
+        let root = repo("group-finish");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/f", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/f", "all.txt", "group work\n");
+        let db = test_db();
+        seed_rows(&db, 60);
+        set_task_status(&db, 60, "done");
+        crate::db::task_groups::create(&db, 1, "trunk/feature/f", "main", 60, &[60]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 60, &dir, &project(&dir)).expect("should land");
+
+        assert!(
+            matches!(outcome, BranchCleanup::Merged { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "main", "all.txt").is_some());
+        // The trunk has served its purpose and its commits are on the base.
+        assert!(!branch_exists(&root, "trunk/feature/f"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_conflicting_trunk_merge_keeps_the_trunk() {
+        let root = repo("group-conflict");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/k", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/k", "shared.txt", "trunk side\n");
+        commit_file(&root, "shared.txt", "main side\n");
+        let db = test_db();
+        seed_rows(&db, 61);
+        set_task_status(&db, 61, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/k", "main", 61, &[61]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 61, &dir, &project(&dir)).expect("attempted");
+
+        // Losing a whole group's work to a conflict is the failure this exists to
+        // prevent: the trunk must survive for the user to resolve by hand.
+        assert!(
+            matches!(outcome, BranchCleanup::KeptMergeRefused { .. }),
+            "{outcome:?}"
+        );
+        assert!(branch_exists(&root, "trunk/feature/k"));
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_FAILED
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_member_that_is_not_the_target_does_not_land_the_trunk() {
+        let root = repo("group-nontarget");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/m", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/m", "some.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 62);
+        seed_rows(&db, 63);
+        set_task_status(&db, 62, "done");
+        set_task_status(&db, 63, "done");
+        // 63 is the target; 62 is a prerequisite that just finished.
+        crate::db::task_groups::create(&db, 1, "trunk/feature/m", "main", 63, &[62, 63]).unwrap();
+
+        assert!(finish_group_if_complete(&db, 62, &dir, &project(&dir)).is_none());
+
+        // A prerequisite finishing must not put the group's partial work on the base.
+        assert!(file_on(&root, "main", "some.txt").is_none());
+        assert!(branch_exists(&root, "trunk/feature/m"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_target_waits_for_every_member_before_landing() {
+        let root = repo("group-incomplete");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/w", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/w", "partial.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 64);
+        seed_rows(&db, 65);
+        set_task_status(&db, 64, "done");
+        // The target is done but a sibling is still in review.
+        set_task_status(&db, 65, "testing");
+        crate::db::task_groups::create(&db, 1, "trunk/feature/w", "main", 64, &[64, 65]).unwrap();
+
+        assert!(finish_group_if_complete(&db, 64, &dir, &project(&dir)).is_none());
+
+        // Landing now would put a sibling's unapproved work on the base branch.
+        assert!(file_on(&root, "main", "partial.txt").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_completing_does_nothing() {
+        let root = repo("group-none");
+        let dir = root.to_string_lossy().to_string();
+        let db = test_db();
+        seed_rows(&db, 66);
+        set_task_status(&db, 66, "done");
+
+        assert!(finish_group_if_complete(&db, 66, &dir, &project(&dir)).is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_landed_group_releases_its_tasks_so_they_can_run_again() {
+        let root = repo("group-release");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/rel", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/rel", "rel.txt", "work\n");
+        let db = test_db();
+        seed_rows(&db, 67);
+        set_task_status(&db, 67, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/rel", "main", 67, &[67]).unwrap();
+
+        finish_group_if_complete(&db, 67, &dir, &project(&dir)).expect("should land");
+
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_COMPLETED
+        );
+        assert!(crate::db::task_groups::for_task(&db, 67).is_none());
+        // The assertion that distinguishes finish() from set_status(): membership
+        // has to be released, or UNIQUE(task_id) refuses to ever run this task in
+        // another chain. for_task alone cannot tell the two apart, because it
+        // filters on status either way.
+        assert!(
+            crate::db::task_groups::create(&db, 1, "trunk/feature/again", "main", 67, &[67])
+                .is_ok(),
+            "the task is still claimed by the group that already landed"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
