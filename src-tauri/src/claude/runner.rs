@@ -741,6 +741,19 @@ pub fn cleanup_task_branch(
     task: &tasks::Task,
     working_dir: &str,
     project: &projects::Project,
+    db: &DbPool,
+) -> BranchCleanup {
+    let trunk = crate::db::task_groups::for_task(db, task.id).map(|g| g.trunk_branch);
+    cleanup_task_branch_in(task, working_dir, project, trunk.as_deref())
+}
+
+/// The body of [`cleanup_task_branch`] with the group trunk already resolved, so it
+/// can be tested against a repository without a database.
+fn cleanup_task_branch_in(
+    task: &tasks::Task,
+    working_dir: &str,
+    project: &projects::Project,
+    trunk: Option<&str>,
 ) -> BranchCleanup {
     // Always clean up worktree regardless of other settings
     cleanup_task_worktree(task.id, working_dir);
@@ -756,7 +769,9 @@ pub fn cleanup_task_branch(
         Some(b) if !b.is_empty() => b,
         _ => return BranchCleanup::Skipped,
     };
-    let base = project.pr_base_branch.as_deref().unwrap_or("main");
+    // A grouped task lands on its trunk; the group's target task is what moves the
+    // project's base branch.
+    let base = trunk.unwrap_or_else(|| project.pr_base_branch.as_deref().unwrap_or("main"));
     if branch == base {
         return BranchCleanup::Skipped;
     }
@@ -775,8 +790,12 @@ pub fn cleanup_task_branch(
     // With auto_merge on, this is the step that makes "done" mean "landed".
     // Without it nothing in the task lifecycle ever moves work onto the base
     // branch, so branches accumulate — safe, but never finished.
+    // Inside a group this is not optional. The next task in the chain branches from
+    // the trunk and has to see this work, so gating it behind auto_merge — off by
+    // default — would leave every dependent task building on nothing.
+    let must_merge = trunk.is_some() || project.auto_merge.unwrap_or(0) == 1;
     let mut merged_here = false;
-    if project.auto_merge.unwrap_or(0) == 1 && !branch_is_merged_into(branch, base, working_dir) {
+    if must_merge && !branch_is_merged_into(branch, base, working_dir) {
         match merge_task_branch(branch, base, working_dir) {
             Ok(()) => {
                 merged_here = true;
@@ -1687,7 +1706,8 @@ fn handle_process_lifecycle(
                     ) {
                         auto_create_pr_public(&done_task, working_dir, &proj, db, app);
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
-                        let cleanup = cleanup_task_branch(&after_pr, project_working_dir, &proj);
+                        let cleanup =
+                            cleanup_task_branch(&after_pr, project_working_dir, &proj, db);
                         report_branch_cleanup(cleanup, task_id, db, app);
 
                         if proj.github_sync_enabled.unwrap_or(0) == 1 {
@@ -2520,8 +2540,12 @@ After all checks, you MUST output this exact JSON block as your final output:
                                 // Cleanup worktree + feature branch using project root dir
                                 let after_pr =
                                     tasks::get_by_id(&db, task_id).unwrap_or(done_task.clone());
-                                let cleanup =
-                                    cleanup_task_branch(&after_pr, &project_working_dir, &proj);
+                                let cleanup = cleanup_task_branch(
+                                    &after_pr,
+                                    &project_working_dir,
+                                    &proj,
+                                    &db,
+                                );
                                 report_branch_cleanup(cleanup, task_id, &db, &app);
 
                                 // Auto-close linked GitHub issue
@@ -3031,6 +3055,135 @@ mod tests {
         assert_eq!(resolve_task_base(None, "main"), "main");
     }
 
+    /// Branches `branch` off `from`, commits `file` on it, and returns to main.
+    fn commit_on_from(root: &Path, branch: &str, file: &str, from: &str) {
+        assert!(git(&["checkout", "--quiet", "-b", branch, from], root));
+        std::fs::write(root.join(file), "work\n").unwrap();
+        git(&["add", "."], root);
+        assert!(git(&["commit", "--quiet", "-m", file], root));
+        assert!(git(&["checkout", "--quiet", "main"], root));
+    }
+
+    #[test]
+    fn a_grouped_task_merges_into_the_trunk_and_leaves_base_alone() {
+        let root = repo("cleanup-trunk");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/t", "main"], &root));
+        commit_on_from(&root, "feature/member", "m.txt", "trunk/feature/t");
+        let base_before = rev_parse(&root, "main");
+
+        let outcome = cleanup_task_branch_in(
+            &task(9100, "feature/member"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/t"),
+        );
+
+        assert_eq!(
+            outcome,
+            BranchCleanup::Merged {
+                branch: "feature/member".into(),
+                base: "trunk/feature/t".into(),
+            }
+        );
+        assert!(file_on(&root, "trunk/feature/t", "m.txt").is_some());
+        // Only the group's target task is allowed to move the base branch.
+        assert_eq!(rev_parse(&root, "main"), base_before);
+        assert!(!branch_exists(&root, "feature/member"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_grouped_task_merges_into_its_trunk_even_with_auto_merge_off() {
+        let root = repo("cleanup-trunk-no-automerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/n", "main"], &root));
+        commit_on_from(&root, "feature/member2", "m2.txt", "trunk/feature/n");
+
+        // auto_merge is off, which is the shipped default.
+        let outcome = cleanup_task_branch_in(
+            &task(9101, "feature/member2"),
+            &dir,
+            &project(&dir),
+            Some("trunk/feature/n"),
+        );
+
+        // Landing on the trunk is what the group is *for*: the next task in the
+        // chain branches from it and has to see this work. Gating that behind
+        // auto_merge would leave every dependent task building on nothing.
+        assert!(
+            file_on(&root, "trunk/feature/n", "m2.txt").is_some(),
+            "got {outcome:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_ungrouped_task_still_needs_auto_merge_to_land_anywhere() {
+        let root = repo("cleanup-ungrouped");
+        let dir = root.to_string_lossy().to_string();
+        commit_on_from(&root, "feature/solo", "s.txt", "main");
+
+        let outcome =
+            cleanup_task_branch_in(&task(9102, "feature/solo"), &dir, &project(&dir), None);
+
+        // Unchanged behaviour outside a group: nothing moves the base branch on its
+        // own, and the branch is kept because its commits live nowhere else.
+        assert!(matches!(outcome, BranchCleanup::KeptUnmerged { .. }));
+        assert!(branch_exists(&root, "feature/solo"));
+        assert!(file_on(&root, "main", "s.txt").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_conflicting_trunk_merge_keeps_the_task_branch() {
+        let root = repo("cleanup-trunk-conflict");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/c", "main"], &root));
+        // Both the trunk and the member touch the same file.
+        assert!(git(&["checkout", "--quiet", "trunk/feature/c"], &root));
+        commit_file(&root, "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        assert!(git(
+            &["checkout", "--quiet", "-b", "feature/conflict", "main"],
+            &root
+        ));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+
+        let outcome = cleanup_task_branch_in(
+            &task(9103, "feature/conflict"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/c"),
+        );
+
+        // The member's work exists nowhere else, so a refused merge must keep it.
+        assert!(matches!(outcome, BranchCleanup::KeptMergeRefused { .. }));
+        assert!(branch_exists(&root, "feature/conflict"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_task_whose_branch_is_its_own_trunk_is_left_alone() {
+        let root = repo("cleanup-trunk-self");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/s", "main"], &root));
+
+        let outcome = cleanup_task_branch_in(
+            &task(9104, "trunk/feature/s"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            Some("trunk/feature/s"),
+        );
+
+        // Merging a branch into itself and then deleting it would take the group's
+        // integration branch with it.
+        assert_eq!(outcome, BranchCleanup::Skipped);
+        assert!(branch_exists(&root, "trunk/feature/s"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_revision_after_a_restart_keeps_its_worktree_and_its_uncommitted_work() {
         // This is the data-loss path. TASK_WORKTREES only records worktrees this
@@ -3310,6 +3463,16 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    fn rev_parse(root: &Path, rev: &str) -> String {
+        let mut cmd = crate::child_env::command("git");
+        let out = cmd
+            .args(["rev-parse", rev])
+            .current_dir(root)
+            .output()
+            .expect("rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     fn branch_exists(root: &Path, branch: &str) -> bool {
         git(
             &[
@@ -3453,10 +3616,11 @@ mod tests {
         commit_on(&root, "feature/land", "land.txt");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(
+        let outcome = cleanup_task_branch_in(
             &task(9003, "feature/land"),
             &dir,
             &project_with_merge(&dir, 1),
+            None,
         );
 
         assert_eq!(
@@ -3482,8 +3646,12 @@ mod tests {
         commit_file(&root, "shared.txt", "main side\n");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome =
-            cleanup_task_branch(&task(9004, "feature/x"), &dir, &project_with_merge(&dir, 1));
+        let outcome = cleanup_task_branch_in(
+            &task(9004, "feature/x"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            None,
+        );
 
         assert_eq!(
             outcome,
@@ -3504,7 +3672,8 @@ mod tests {
         commit_on(&root, "feature/keep-me", "keep.txt");
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(&task(9001, "feature/keep-me"), &dir, &project(&dir));
+        let outcome =
+            cleanup_task_branch_in(&task(9001, "feature/keep-me"), &dir, &project(&dir), None);
 
         assert_eq!(
             outcome,
@@ -3533,7 +3702,8 @@ mod tests {
         ));
         let dir = root.to_string_lossy().to_string();
 
-        let outcome = cleanup_task_branch(&task(9002, "feature/done"), &dir, &project(&dir));
+        let outcome =
+            cleanup_task_branch_in(&task(9002, "feature/done"), &dir, &project(&dir), None);
 
         assert_eq!(outcome, BranchCleanup::Deleted);
         // The commits live on main now, so tidying the branch away loses nothing.
