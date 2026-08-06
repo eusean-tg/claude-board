@@ -1,5 +1,6 @@
 pub mod artifact_store;
 pub mod artifacts;
+pub mod blockers;
 pub mod github;
 pub mod github_sync;
 pub mod gsd;
