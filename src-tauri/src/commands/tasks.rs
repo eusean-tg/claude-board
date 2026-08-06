@@ -411,6 +411,7 @@ fn execute_done_side_effects(db: &crate::db::DbPool, app: &AppHandle, id: i64, t
         let after_pr = tq::get_by_id(db, id).unwrap_or(fresh_task.clone());
         // Cleanup uses project root (manages worktrees and branches)
         let cleanup = runner::cleanup_task_branch(&after_pr, &project.working_dir, &project, db);
+        runner::stop_group_after_failed_merge(db, Some(app), id, &cleanup);
         runner::report_branch_cleanup(cleanup, id, db, app);
         // Approving the group's target task is what lands its trunk on the base.
         if let Some(landed) =

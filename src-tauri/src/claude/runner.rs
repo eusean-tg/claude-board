@@ -650,6 +650,9 @@ pub enum BranchCleanup {
         base: String,
         refusal: MergeRefusal,
     },
+    /// A group finished and its trunk was kept on purpose, because Auto Merge is off.
+    /// Every member's work is on the trunk, waiting to be merged by hand.
+    KeptGroupTrunk { trunk: String, base: String },
 }
 
 /// True when the working directory has no uncommitted changes.
@@ -805,20 +808,101 @@ pub fn finish_group_if_complete(
     } else {
         group.base_branch.clone()
     };
-    let outcome = land_trunk(working_dir, &group.trunk_branch, &base);
+    // Moving the project's base branch is the decision Auto Merge governs, and a
+    // group does not get to override it. Merging each member onto the trunk is a
+    // different question with a different answer — the chain cannot function without
+    // it — so that stays unconditional and only this last step is a setting.
+    let outcome = if project.auto_merge.unwrap_or(0) == 1 {
+        land_trunk(working_dir, &group.trunk_branch, &base)
+    } else {
+        BranchCleanup::KeptGroupTrunk {
+            trunk: group.trunk_branch.clone(),
+            base: base.clone(),
+        }
+    };
 
     // finish() rather than set_status(): it releases the members too. The trunk is
-    // gone on success, and on refusal it survives for the user to merge by hand —
-    // either way leaving the tasks claimed by this group would refuse to ever run
-    // them in another chain.
+    // gone on success, and when it survives — refused, or kept because Auto Merge is
+    // off — leaving the tasks claimed by this group would refuse to ever run them in
+    // another chain.
     let status = match &outcome {
-        BranchCleanup::Merged { .. } => crate::db::task_groups::STATUS_COMPLETED,
+        BranchCleanup::Merged { .. } | BranchCleanup::KeptGroupTrunk { .. } => {
+            crate::db::task_groups::STATUS_COMPLETED
+        }
         _ => crate::db::task_groups::STATUS_FAILED,
     };
     if let Err(e) = crate::db::task_groups::finish(db, group.id, status) {
         log::error!("could not close group {}: {}", group.id, e);
     }
     Some(outcome)
+}
+
+/// Stop a run whose member could not put its work on the trunk.
+///
+/// Every task after this one was told it depends on work that is now not there, so
+/// continuing would run them against a premise that is false. Their prerequisite
+/// reports `done` and its commits are safe on its own branch, which is exactly why
+/// this has to be said out loud: nothing else about the board looks wrong.
+///
+/// Returns true when a run was stopped, so the caller can skip trying to land it.
+pub fn stop_group_after_failed_merge(
+    db: &DbPool,
+    app: Option<&AppHandle>,
+    task_id: i64,
+    outcome: &BranchCleanup,
+) -> bool {
+    let (branch, base, refusal) = match outcome {
+        BranchCleanup::KeptMergeRefused {
+            branch,
+            base,
+            refusal,
+        } => (branch, base, refusal),
+        _ => return false,
+    };
+    let Some(group) = crate::db::task_groups::for_task(db, task_id) else {
+        return false;
+    };
+    // A refusal to merge onto the *project's* base branch is a different event: the
+    // task's own work is waiting, and no chain depends on it having landed.
+    if base != &group.trunk_branch {
+        return false;
+    }
+
+    if let Err(e) =
+        crate::db::task_groups::finish(db, group.id, crate::db::task_groups::STATUS_FAILED)
+    {
+        log::error!("could not fail group {}: {}", group.id, e);
+    }
+
+    let msg = format!(
+        "This run stopped. {} could not be merged into {} because {}, so the tasks after it were not started — the work they depend on is not on {}. Nothing is lost: {} still holds its commits, and so does {}.",
+        branch,
+        base,
+        refusal.reason(),
+        base,
+        branch,
+        base
+    );
+    tasks::add_log(db, task_id, &msg, "error", None);
+    if let Some(task) = tasks::get_by_id(db, task_id) {
+        activity::add(
+            db,
+            task.project_id,
+            Some(task_id),
+            "group_failed",
+            &format!("Dependency run stopped: {} was not merged", branch),
+            None,
+        );
+    }
+    if let Some(app) = app {
+        app.emit(
+            "task:log",
+            &serde_json::json!({"taskId": task_id, "message": msg, "logType": "error"}),
+        )
+        .ok();
+    }
+    log::warn!("group {} stopped: {}", group.id, msg);
+    true
 }
 
 /// Merge `trunk` into `base` and delete the trunk once its commits are reachable.
@@ -1022,6 +1106,13 @@ pub fn report_branch_cleanup(outcome: BranchCleanup, task_id: i64, db: &DbPool, 
                 refusal.reason()
             ),
             "error",
+        ),
+        BranchCleanup::KeptGroupTrunk { trunk, base } => (
+            format!(
+                "Every task in this run is on {}. Auto Merge is off, so {} was not moved — merge {} when you are ready.",
+                trunk, base, trunk
+            ),
+            "info",
         ),
     };
 
@@ -1837,6 +1928,7 @@ fn handle_process_lifecycle(
                         let after_pr = tasks::get_by_id(db, task_id).unwrap_or(done_task.clone());
                         let cleanup =
                             cleanup_task_branch(&after_pr, project_working_dir, &proj, db);
+                        stop_group_after_failed_merge(db, Some(app), task_id, &cleanup);
                         report_branch_cleanup(cleanup, task_id, db, app);
                         // The task's work is on the trunk now; if it was the one the
                         // group exists to deliver, the trunk goes to the base branch.
@@ -2682,6 +2774,7 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     &proj,
                                     &db,
                                 );
+                                stop_group_after_failed_merge(&db, Some(&app), task_id, &cleanup);
                                 report_branch_cleanup(cleanup, task_id, &db, &app);
                                 if let Some(landed) = finish_group_if_complete(
                                     &db,
@@ -3348,7 +3441,8 @@ mod tests {
         set_task_status(&db, 60, "done");
         crate::db::task_groups::create(&db, 1, "trunk/feature/f", "main", 60, &[60]).unwrap();
 
-        let outcome = finish_group_if_complete(&db, 60, &dir, &project(&dir)).expect("should land");
+        let outcome = finish_group_if_complete(&db, 60, &dir, &project_with_merge(&dir, 1))
+            .expect("should land");
 
         assert!(
             matches!(outcome, BranchCleanup::Merged { .. }),
@@ -3357,6 +3451,119 @@ mod tests {
         assert!(file_on(&root, "main", "all.txt").is_some());
         // The trunk has served its purpose and its commits are on the base.
         assert!(!branch_exists(&root, "trunk/feature/f"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_trunk_waits_for_a_hand_when_auto_merge_is_off() {
+        let root = repo("group-nomerge");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/w", "main"], &root));
+        commit_on_branch(&root, "trunk/feature/w", "w.txt", "group work\n");
+        let db = test_db();
+        seed_rows(&db, 70);
+        set_task_status(&db, 70, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/w", "main", 70, &[70]).unwrap();
+
+        let outcome = finish_group_if_complete(&db, 70, &dir, &project_with_merge(&dir, 0))
+            .expect("the group still closes");
+
+        // Auto Merge off means the base branch does not move, for a run exactly as
+        // for a single task. Moving it anyway would land work the user had asked to
+        // keep off their base branch.
+        assert!(
+            matches!(outcome, BranchCleanup::KeptGroupTrunk { .. }),
+            "{outcome:?}"
+        );
+        assert!(file_on(&root, "main", "w.txt").is_none());
+        // The work has to still be somewhere, and reachable by name.
+        assert!(branch_exists(&root, "trunk/feature/w"));
+        assert_eq!(
+            file_on(&root, "trunk/feature/w", "w.txt").as_deref(),
+            Some("group work\n")
+        );
+        // Completed, not failed: nothing went wrong.
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_COMPLETED
+        );
+        assert!(crate::db::task_groups::members(&db, group).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_member_that_could_not_reach_the_trunk_stops_the_run() {
+        let root = repo("group-stop");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/st", "main"], &root));
+        // The member's branch and the trunk change the same line, so the member's
+        // work cannot reach the trunk.
+        commit_on_branch(&root, "trunk/feature/st", "shared.txt", "trunk side\n");
+        assert!(git(&["checkout", "--quiet", "-b", "feature/st"], &root));
+        commit_file(&root, "shared.txt", "member side\n");
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 71);
+        seed_rows(&db, 72);
+        set_task_status(&db, 71, "done");
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/st", "main", 72, &[71, 72])
+                .unwrap();
+
+        let outcome = cleanup_task_branch(
+            &task(71, "feature/st"),
+            &dir,
+            &project_with_merge(&dir, 1),
+            &db,
+        );
+        let stopped = stop_group_after_failed_merge(&db, None, 71, &outcome);
+
+        assert!(
+            stopped,
+            "a refused trunk merge has to stop the run: {outcome:?}"
+        );
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_FAILED
+        );
+        // Task 72 was going to build on work that is not on the trunk. Nothing may
+        // start it as part of this run.
+        assert!(crate::db::task_groups::for_task(&db, 72).is_none());
+        // And the trunk must not land later either, however 72 ends up finishing.
+        set_task_status(&db, 72, "done");
+        assert!(finish_group_if_complete(&db, 72, &dir, &project_with_merge(&dir, 1)).is_none());
+        // Both sides of the failed merge still hold their commits.
+        assert!(branch_exists(&root, "feature/st"));
+        assert!(branch_exists(&root, "trunk/feature/st"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_refused_merge_onto_the_base_branch_does_not_stop_a_run() {
+        // No merge is attempted here — the outcome under test is constructed — so
+        // the repo exists only to give the group a plausible trunk to name.
+        let root = repo("group-stop-base");
+        assert!(git(&["branch", "trunk/feature/sb", "main"], &root));
+        let db = test_db();
+        seed_rows(&db, 73);
+        let group =
+            crate::db::task_groups::create(&db, 1, "trunk/feature/sb", "main", 73, &[73]).unwrap();
+
+        // A task's own branch failing to reach the project's base branch is a
+        // different event: no member of the run was waiting on it.
+        let outcome = BranchCleanup::KeptMergeRefused {
+            branch: "feature/sb".into(),
+            base: "main".into(),
+            refusal: MergeRefusal::Conflict,
+        };
+        let stopped = stop_group_after_failed_merge(&db, None, 73, &outcome);
+
+        assert!(!stopped);
+        assert_eq!(
+            crate::db::task_groups::get(&db, group).unwrap().status,
+            crate::db::task_groups::STATUS_ACTIVE
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3373,7 +3580,8 @@ mod tests {
         let group =
             crate::db::task_groups::create(&db, 1, "trunk/feature/k", "main", 61, &[61]).unwrap();
 
-        let outcome = finish_group_if_complete(&db, 61, &dir, &project(&dir)).expect("attempted");
+        let outcome = finish_group_if_complete(&db, 61, &dir, &project_with_merge(&dir, 1))
+            .expect("attempted");
 
         // Losing a whole group's work to a conflict is the failure this exists to
         // prevent: the trunk must survive for the user to resolve by hand.
@@ -3456,7 +3664,7 @@ mod tests {
         let group =
             crate::db::task_groups::create(&db, 1, "trunk/feature/rel", "main", 67, &[67]).unwrap();
 
-        finish_group_if_complete(&db, 67, &dir, &project(&dir)).expect("should land");
+        finish_group_if_complete(&db, 67, &dir, &project_with_merge(&dir, 1)).expect("should land");
 
         assert_eq!(
             crate::db::task_groups::get(&db, group).unwrap().status,

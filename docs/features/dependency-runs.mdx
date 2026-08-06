@@ -65,24 +65,39 @@ Merging into the trunk is not optional and does not depend on Auto Merge. It is 
 
 ## Landing on the base branch
 
-Only the task you started moves the base branch, and only once **every** task in the chain has been approved.
+Moving the base branch is what Auto Merge decides, for a chain exactly as for a single task. With it off — the default — the chain finishes and its trunk is kept:
+
+```
+Every task in this run is on trunk/feature/wire-the-artifacts-tab. Auto Merge
+is off, so main was not moved — merge trunk/feature/wire-the-artifacts-tab
+when you are ready.
+```
+
+With Auto Merge on, only the task you started moves the base branch, and only once **every** task in the chain has been approved.
 
 That wait is deliberate. A task's work reaches the trunk when it finishes running, which is before you have reviewed it. Landing the trunk any earlier would put a sibling's unreviewed changes on your base branch.
 
 When it does land, the trunk merges into the base and is deleted. Its commits are on the base branch by then, and reachability is checked before the delete rather than assumed from the merge reporting success.
 
-### When the merge conflicts
+### When a merge is refused
 
-The trunk is kept, the chain is marked failed, and the log names the branch:
+A trunk that cannot merge into the base is kept and the chain is marked failed. Nothing is lost — every task's work is on that trunk, and the trunk is still there. The most common cause is the base branch moving while the chain ran, so the merge conflicts on files the chain never touched.
+
+One level down the consequence is larger, so the chain stops there:
 
 ```
-Keeping group trunk trunk/feature/wire-the-artifacts-tab: it could not be
-merged into main (merge conflict). Merge it by hand to land the group's work.
+This run stopped. feature/discovery-service could not be merged into
+trunk/feature/wire-the-artifacts-tab because of a merge conflict, so the tasks
+after it were not started — the work they depend on is not on the trunk.
 ```
 
-Nothing is lost. Every task's work is on that trunk, and the trunk is still there. The most common cause is the base branch moving while the chain ran, so the merge conflicts on files the chain never touched.
+The task itself still reports done and its commits are safe on its own branch, which is why this is said out loud: nothing else on the board looks wrong. Every task after it was told it depends on work that is not on the trunk, and running them against a premise that is false wastes the run and produces changes built on nothing.
 
-The same applies one level down: a task branch that cannot merge into the trunk is kept, and its commits stay on it.
+Merge the branch by hand, then start the stopped task again.
+
+<Note>
+Stopping the chain stops the chain. If [Auto-Queue](/features/queue) is on, a task whose prerequisites are marked done can still be picked up as ordinary ready work, because dependency readiness is a question about task status rather than about what reached a branch.
+</Note>
 
 ## What a chain does not touch
 
