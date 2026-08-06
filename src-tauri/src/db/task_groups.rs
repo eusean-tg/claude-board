@@ -119,6 +119,32 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
     .ok()
 }
 
+/// Trunk branch per task, for every task in a live group in this project.
+///
+/// One query for the whole board rather than `for_task` per card.
+pub fn trunks_by_task(db: &DbPool, project_id: i64) -> std::collections::HashMap<i64, String> {
+    let conn = db.lock();
+    let mut stmt = match conn.prepare(
+        "SELECT m.task_id, g.trunk_branch FROM task_groups g
+         JOIN task_group_members m ON m.group_id = g.id
+         WHERE g.project_id = ?1 AND g.status = 'active'",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("trunks_by_task: {}", e);
+            return std::collections::HashMap::new();
+        }
+    };
+    let mut out = std::collections::HashMap::new();
+    match stmt.query_map(params![project_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    }) {
+        Ok(rows) => out.extend(rows.flatten()),
+        Err(e) => log::error!("trunks_by_task: {}", e),
+    }
+    out
+}
+
 /// Task ids in a group, in the order they were added.
 pub fn members(db: &DbPool, group_id: i64) -> Vec<i64> {
     let conn = db.lock();
@@ -298,6 +324,26 @@ mod tests {
         // tasks must not stay claimed by it forever.
         assert!(for_task(&db, a).is_none());
         assert_eq!(get(&db, id).unwrap().status, STATUS_FAILED);
+    }
+
+    #[test]
+    fn trunks_by_task_covers_every_member_of_a_live_group_only() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let done_member = seed_task(&db, "old");
+        let live = create(&db, 1, "trunk/live", "main", b, &[a, b]).unwrap();
+        let old = create(&db, 1, "trunk/old", "main", done_member, &[done_member]).unwrap();
+        finish(&db, old, STATUS_COMPLETED).unwrap();
+
+        let map = trunks_by_task(&db, 1);
+
+        assert_eq!(map.get(&a).map(String::as_str), Some("trunk/live"));
+        assert_eq!(map.get(&b).map(String::as_str), Some("trunk/live"));
+        // A landed group's trunk is deleted, so showing it on a card would name a
+        // branch that is gone.
+        assert!(!map.contains_key(&done_member));
+        assert_eq!(get(&db, live).unwrap().status, STATUS_ACTIVE);
     }
 
     #[test]

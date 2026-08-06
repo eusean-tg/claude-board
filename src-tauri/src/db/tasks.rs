@@ -55,6 +55,13 @@ pub struct Task {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub is_running: bool,
+    /// How many of this task's dependencies have not finished. Not a column:
+    /// computed from the graph when a list is read, the way `is_running` is.
+    #[serde(default)]
+    pub waiting_on: i64,
+    /// The shared branch of the group this task is running in, when it is in one.
+    #[serde(default)]
+    pub trunk_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +134,8 @@ pub fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         is_running: false,
+        waiting_on: 0,
+        trunk_branch: None,
     })
 }
 

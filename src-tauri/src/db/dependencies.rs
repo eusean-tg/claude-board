@@ -137,6 +137,37 @@ pub fn are_all_parents_met(db: &DbPool, task_id: i64) -> bool {
     unmet_parent_ids(db, task_id).is_empty()
 }
 
+/// How many unmet parents each task in a project has, for tasks that have any.
+///
+/// One query rather than `unmet_parent_ids` per task: this feeds the task list,
+/// which is read on every board refresh, and a query per card adds up.
+pub fn unmet_parent_counts(db: &DbPool, project_id: i64) -> HashMap<i64, i64> {
+    let sql = format!(
+        "SELECT td.task_id, COUNT(*) FROM task_dependencies td
+         JOIN tasks parent ON parent.id = td.depends_on_id
+         JOIN tasks child ON child.id = td.task_id
+         WHERE child.project_id = ?1 AND NOT ({})
+         GROUP BY td.task_id",
+        edge_is_met_sql("parent")
+    );
+    let conn = db.lock();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("unmet_parent_counts: {}", e);
+            return HashMap::new();
+        }
+    };
+    let mut out = HashMap::new();
+    match stmt.query_map(params![project_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    }) {
+        Ok(rows) => out.extend(rows.flatten()),
+        Err(e) => log::error!("unmet_parent_counts: {}", e),
+    }
+    out
+}
+
 /// Transitive ancestors of `task_id` that still have to run, ordered leaves first.
 ///
 /// Empty means the task can start now — the same answer [`are_all_parents_met`]
@@ -465,6 +496,61 @@ mod tests {
 
         // Depth is the longest path, not the shortest: d waits for both branches.
         assert_eq!(wave_ids(&waves), vec![vec![a], vec![b, c], vec![d]]);
+    }
+
+    #[test]
+    fn the_counts_agree_with_the_per_task_query() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        let c = seed_task(&db, "c");
+        add_dependency(&db, c, a, None).unwrap();
+        add_dependency(&db, c, b, None).unwrap();
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+
+        let counts = unmet_parent_counts(&db, 1);
+
+        // The batch query exists for speed; drifting from unmet_parent_ids would
+        // make cards disagree with the gate that actually refuses the start.
+        for id in [a, b, c] {
+            assert_eq!(
+                counts.get(&id).copied().unwrap_or(0),
+                unmet_parent_ids(&db, id).len() as i64,
+                "disagreed for task {id}"
+            );
+        }
+        // a is done, so only c still waits — on b alone.
+        assert_eq!(counts.get(&c).copied().unwrap_or(0), 1);
+        assert!(!counts.contains_key(&a));
+    }
+
+    #[test]
+    fn counts_are_scoped_to_the_project() {
+        let db = test_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO projects (id,name,slug,working_dir) VALUES (2,'O','o','/other')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id,project_id,title,status) VALUES (900,2,'far','backlog')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id,project_id,title,status) VALUES (901,2,'near','backlog')",
+                [],
+            )
+            .unwrap();
+        }
+        add_dependency(&db, 901, 900, None).unwrap();
+
+        // Another project's blocked task must not appear on this project's board.
+        assert!(unmet_parent_counts(&db, 1).is_empty());
+        assert_eq!(unmet_parent_counts(&db, 2).get(&901).copied(), Some(1));
     }
 
     #[test]

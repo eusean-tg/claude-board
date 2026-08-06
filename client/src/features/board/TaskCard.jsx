@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   FlaskConical,
   HelpCircle,
+  Hourglass,
 } from 'lucide-react';
 import { formatDuration, formatTokens } from '../../lib/formatters';
 import {
@@ -296,6 +297,28 @@ const TaskCard = memo(function TaskCard({
               <span className="flex items-center gap-1 text-[10px] font-medium text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded">
                 <FlaskConical size={10} className={task.is_running ? 'animate-pulse' : ''} />
                 {t('status.testing')}
+              </span>
+            )}
+            {/* Deliberately not the word "blocked", and not its styling: that marker
+                means an agent asked a question and needs an answer. This task needs
+                another task to finish. Only shown before the task starts, since a
+                running task's dependencies were met when it began. */}
+            {task.status === 'backlog' && (task.waiting_on ?? 0) > 0 && (
+              <span
+                className="flex items-center gap-1 text-[10px] font-medium text-surface-400 bg-surface-700/50 px-1.5 py-0.5 rounded"
+                title={t('card.waitingOn', { count: task.waiting_on })}
+              >
+                <Hourglass size={10} />
+                {t('card.waitingOn', { count: task.waiting_on })}
+              </span>
+            )}
+            {task.trunk_branch && (
+              <span
+                className="flex items-center gap-1 text-[10px] font-medium text-surface-400 bg-surface-700/50 px-1.5 py-0.5 rounded max-w-full"
+                title={t('card.sharedBranch')}
+              >
+                <GitBranch size={10} className="flex-shrink-0" />
+                <span className="truncate">{task.trunk_branch}</span>
               </span>
             )}
             {/* Ahead of the running marker: a blocked task is waiting on a person,

@@ -7,10 +7,15 @@ use tauri::{AppHandle, Emitter};
 #[tauri::command]
 pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
     let db = db::get_db();
+    // Both of these are one query for the whole board rather than one per card.
+    let waiting = db::dependencies::unmet_parent_counts(&db, project_id);
+    let trunks = db::task_groups::trunks_by_task(&db, project_id);
     tq::get_by_project(&db, project_id)
         .into_iter()
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
+            t.waiting_on = waiting.get(&t.id).copied().unwrap_or(0);
+            t.trunk_branch = trunks.get(&t.id).cloned();
             t
         })
         .collect()

@@ -172,6 +172,8 @@ export default {
   'card.viewLogs': 'View Logs',
   'card.moveTo': 'Move to',
   'card.rev': 'Rev',
+  'card.waitingOn': 'waiting on {{count}}',
+  'card.sharedBranch': 'Shared branch for this run',
 
   // ─── List View ───
   'list.title': 'Title',
