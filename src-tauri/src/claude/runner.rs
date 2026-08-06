@@ -613,6 +613,26 @@ fn branch_is_merged_into(branch: &str, base: &str, working_dir: &str) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Whether a local branch of this name still exists.
+///
+/// Named to avoid confusion with the test helper of the same idea: this one takes the
+/// branch first and works from a path string, like its neighbours here.
+fn branch_ref_exists(branch: &str, working_dir: &str) -> bool {
+    let mut cmd = crate::child_env::command("git");
+    cmd.args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{}", branch),
+    ])
+    .current_dir(working_dir)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
 /// Why a merge into the base branch could not be attempted or did not finish.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MergeRefusal {
@@ -623,6 +643,9 @@ pub enum MergeRefusal {
     CannotCheckoutBase,
     /// The merge produced conflicts and was aborted.
     Conflict,
+    /// There is no branch of that name to merge. Reporting this as a conflict sent
+    /// people off to resolve one that did not exist.
+    UnknownBranch,
 }
 
 impl MergeRefusal {
@@ -631,6 +654,7 @@ impl MergeRefusal {
             Self::DirtyWorkingTree => "the working directory has uncommitted changes",
             Self::CannotCheckoutBase => "the base branch could not be checked out",
             Self::Conflict => "the merge conflicted and was rolled back",
+            Self::UnknownBranch => "there is no branch of that name",
         }
     }
 }
@@ -726,6 +750,12 @@ fn merge_task_branch(branch: &str, base: &str, working_dir: &str) -> Result<(), 
     // says.
     let lock = repo_lock(working_dir);
     let _guard = lock.lock();
+
+    // Without this, `git merge <gone>` fails and every failure below is reported as a
+    // conflict — sending the user to resolve one that does not exist.
+    if !branch_ref_exists(branch, working_dir) {
+        return Err(MergeRefusal::UnknownBranch);
+    }
 
     let git = |args: &[&str]| -> bool {
         let mut cmd = crate::child_env::command("git");
@@ -875,6 +905,14 @@ pub fn remerge_stopped_members(
             continue;
         };
         if branch == group.trunk_branch {
+            continue;
+        }
+        // A member that merged successfully had its branch deleted afterwards, which
+        // is the normal end state for one that worked. `merge-base --is-ancestor`
+        // cannot answer for a ref that no longer resolves, so without this check the
+        // resume tried to merge it and failed — every time, for every member that had
+        // already done its job.
+        if !branch_ref_exists(branch, working_dir) {
             continue;
         }
         if branch_is_merged_into(branch, &group.trunk_branch, working_dir) {
@@ -3700,6 +3738,45 @@ mod tests {
             "{outcome:?}"
         );
         assert!(file_on(&root, "trunk/feature/r", "r.txt").is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remerging_skips_a_member_whose_branch_was_already_cleaned_up() {
+        let root = repo("resume-gone");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/g", "main"], &root));
+        commit_on(&root, "feature/g", "g.txt");
+        // What a member that merged successfully leaves behind: its work on the trunk
+        // and no branch. Every real run has at least one of these by the time it stops.
+        assert!(git(&["checkout", "--quiet", "trunk/feature/g"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/g"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        assert!(git(&["branch", "-D", "feature/g"], &root));
+        let db = test_db();
+        let group = stopped_run(&db, 83, "trunk/feature/g", "feature/g");
+
+        let outcome = remerge_stopped_members(&db, &group, &dir);
+
+        // merge-base cannot answer for a ref that does not resolve, so this used to
+        // report a conflict on a branch that was gone and whose work had landed.
+        match outcome {
+            RunResumeOutcome::Ready { merged } => assert!(merged.is_empty(), "{merged:?}"),
+            other => panic!("expected readiness, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merging_a_branch_that_does_not_exist_says_so() {
+        let root = repo("merge-unknown");
+        let dir = root.to_string_lossy().to_string();
+
+        // Reported as a conflict, this sent the user to resolve one that never existed.
+        assert_eq!(
+            merge_task_branch("feature/never-was", "main", &dir),
+            Err(MergeRefusal::UnknownBranch)
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
