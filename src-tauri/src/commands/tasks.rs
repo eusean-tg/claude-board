@@ -466,14 +466,56 @@ pub fn resolve_stopped_run(
     Ok(serde_json::json!({"resolveTaskId": resolve_id, "created": created}))
 }
 
+/// The run's resolve task, if abandoning has to close it first.
+///
+/// Only an unfinished one. A resolution that is done, or was never started, needs
+/// nothing done to it — and moving a finished task backwards would rewrite history
+/// the edges are there to record.
+fn resolve_task_to_close(db: &db::DbPool, group: &db::task_groups::TaskGroup) -> Option<i64> {
+    let id = group.resolve_task_id?;
+    let task = tq::get_by_id(db, id)?;
+    matches!(
+        task.status.as_deref(),
+        Some("in_progress") | Some("blocked")
+    )
+    .then_some(id)
+}
+
 /// Give up on a stopped run, releasing its tasks so they can run in another.
 ///
 /// The trunk is left alone. It holds whatever did merge, and deleting it here would
 /// destroy the only copy of that work.
+///
+/// An unfinished resolve task is closed first. Left running, its agent would finish
+/// into a group that no longer exists — `trunk_for_task` would answer `None`, and
+/// with Auto Merge on its conflict-resolution branch would head for the project's
+/// base branch instead of the trunk. Before membership is released, so there is no
+/// instant where a live member belongs to no run.
 #[tauri::command]
-pub fn abandon_run(task_id: i64) -> Result<serde_json::Value, String> {
+pub fn abandon_run(
+    app: AppHandle,
+    task_id: i64,
+    mcp_port: u16,
+) -> Result<serde_json::Value, String> {
     let db = db::get_db();
     let group = resolvable_run(&db, task_id)?;
+
+    if let Some(resolve_id) = resolve_task_to_close(&db, &group) {
+        // `failed`, not `backlog`: get_ready_tasks takes only backlog, so a freed
+        // resolve task with no parents would become ordinary ready work and the queue
+        // would re-run it against a trunk that is no longer anyone's target.
+        // The transition stops its runner and cancels the question it was waiting on.
+        if let Err(e) = change_status_inner(
+            Some(&app),
+            resolve_id,
+            TaskStatus::Failed.as_str(),
+            mcp_port,
+            StartOverride::None,
+        ) {
+            log::error!("could not close resolve task {}: {}", resolve_id, e);
+        }
+    }
+
     db::task_groups::abandon_stopped(&db, &[task_id]);
     activity::add(
         &db,
@@ -1467,6 +1509,32 @@ mod tests {
 
     fn debt() -> Vec<String> {
         DEBT.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn abandoning_names_the_resolve_task_that_must_be_closed_with_it() {
+        // Left running, an abandoned run's resolve agent would finish into a group
+        // that no longer exists: trunk_for_task answers None, and with Auto Merge on
+        // its conflict-resolution branch would head for the base branch itself.
+        for status in ["in_progress", "blocked"] {
+            let db = test_db();
+            let mut group = stopped_run(&db);
+            let r = with_resolve_task(&db, &mut group, status);
+            assert_eq!(resolve_task_to_close(&db, &group), Some(r), "at {status}");
+        }
+
+        // Finished, and never started: nothing to close either way. Moving a done
+        // resolution backwards would rewrite the record its edges point at.
+        for status in ["done", "backlog", "failed"] {
+            let db = test_db();
+            let mut group = stopped_run(&db);
+            with_resolve_task(&db, &mut group, status);
+            assert_eq!(resolve_task_to_close(&db, &group), None, "at {status}");
+        }
+
+        let db = test_db();
+        let group = stopped_run(&db);
+        assert_eq!(resolve_task_to_close(&db, &group), None, "no resolve task");
     }
 
     #[test]
