@@ -939,6 +939,55 @@ pub fn remerge_stopped_members(
     RunResumeOutcome::Ready { merged }
 }
 
+/// The member branches a stopped run is still missing from its trunk.
+///
+/// The debt a resolution is created for, gated on, and resumed against. A branch is
+/// counted when its member is `done`, the branch still exists, it is not the trunk
+/// itself, and its commits are not already reachable from the trunk — the same three
+/// ref checks [`remerge_stopped_members`] skips on, so "resolved" and "Carry on would
+/// find nothing to merge" are one fact.
+///
+/// Two filters beyond those checks, each load-bearing:
+///
+/// - **`done` only.** An in-flight member's branch also exists unmerged, but nothing
+///   has refused it: its merge is attempted at `done` and not before. Handing it to a
+///   resolution would land half-finished, unreviewed work on the trunk.
+/// - **Never the group's own resolve task.** At verification time the resolve task is
+///   `done` and its branch is, correctly, not yet on the trunk. Counting it would make
+///   every resolution list itself as debt, and no resolution could ever verify.
+pub fn unresolved_member_branches(
+    db: &DbPool,
+    group: &crate::db::task_groups::TaskGroup,
+    working_dir: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in crate::db::task_groups::members(db, group.id) {
+        if group.resolve_task_id == Some(id) {
+            continue;
+        }
+        let Some(task) = tasks::get_by_id(db, id) else {
+            continue;
+        };
+        if task.status.as_deref() != Some("done") {
+            continue;
+        }
+        let Some(branch) = task.branch_name.as_deref().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if branch == group.trunk_branch {
+            continue;
+        }
+        if !branch_ref_exists(branch, working_dir) {
+            continue;
+        }
+        if branch_is_merged_into(branch, &group.trunk_branch, working_dir) {
+            continue;
+        }
+        out.push(branch.to_string());
+    }
+    out
+}
+
 /// Stop a run whose member could not put its work on the trunk.
 ///
 /// Every task after this one was told it depends on work that is now not there, so
@@ -3740,6 +3789,122 @@ mod tests {
         crate::db::task_groups::set_status(db, gid, crate::db::task_groups::STATUS_STOPPED)
             .unwrap();
         crate::db::task_groups::get(db, gid).unwrap()
+    }
+
+    /// A stopped run over several members, each seeded with a status and a branch.
+    /// The first is the group's target.
+    fn stopped_run_over(
+        db: &DbPool,
+        trunk: &str,
+        members: &[(i64, &str, &str)],
+    ) -> crate::db::task_groups::TaskGroup {
+        for (id, status, branch) in members {
+            seed_rows(db, *id);
+            set_task_status(db, *id, status);
+            set_task_branch(db, *id, branch);
+        }
+        let ids: Vec<i64> = members.iter().map(|(id, _, _)| *id).collect();
+        let gid = crate::db::task_groups::create(db, 1, trunk, "main", ids[0], &ids).unwrap();
+        crate::db::task_groups::set_status(db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+        crate::db::task_groups::get(db, gid).unwrap()
+    }
+
+    #[test]
+    fn the_refused_branch_of_a_done_member_is_unresolved() {
+        let root = repo("unresolved-refused");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/u", "main"], &root));
+        commit_on(&root, "feature/x", "x.txt");
+        let db = test_db();
+        let group = stopped_run_over(&db, "trunk/feature/u", &[(90, "done", "feature/x")]);
+
+        // The debt the stop was about: a finished member whose commits never
+        // reached the trunk.
+        assert_eq!(
+            unresolved_member_branches(&db, &group, &dir),
+            vec!["feature/x".to_string()]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_branch_the_user_merged_by_hand_is_already_resolved() {
+        let root = repo("unresolved-byhand");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/b", "main"], &root));
+        commit_on(&root, "feature/b", "b.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/b"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/b"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = stopped_run_over(&db, "trunk/feature/b", &[(91, "done", "feature/b")]);
+
+        // The same predicate remerge_stopped_members skips on, which is what lets
+        // Carry on and Resolve agree about whether there is anything left to do.
+        assert!(unresolved_member_branches(&db, &group, &dir).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_in_flight_members_branch_is_not_up_for_resolving() {
+        let root = repo("unresolved-inflight");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/i", "main"], &root));
+        commit_on(&root, "feature/i", "i.txt");
+        let db = test_db();
+        let group = stopped_run_over(&db, "trunk/feature/i", &[(92, "in_progress", "feature/i")]);
+
+        // Its branch exists and is unmerged, but nothing refused it — its merge is
+        // attempted at done and not before. Handing it to a resolution would land
+        // half-finished, unreviewed work on the trunk.
+        assert!(unresolved_member_branches(&db, &group, &dir).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_resolve_tasks_own_branch_is_not_part_of_the_debt() {
+        let root = repo("unresolved-self");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/s", "main"], &root));
+        commit_on(&root, "feature/s", "s.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/s"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/s"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        commit_on(&root, "feature/resolve", "r.txt");
+        let db = test_db();
+        let group = stopped_run_over(
+            &db,
+            "trunk/feature/s",
+            &[(93, "done", "feature/s"), (94, "done", "feature/resolve")],
+        );
+        crate::db::task_groups::set_resolve_task(&db, group.id, 94).unwrap();
+        let group = crate::db::task_groups::get(&db, group.id).unwrap();
+
+        // This is asked at verification time, when the resolve task is done and its
+        // branch has not landed yet. Counting it would make every resolution list
+        // itself as debt and no resolution could ever verify.
+        assert!(unresolved_member_branches(&db, &group, &dir).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_deleted_branch_has_nothing_left_to_resolve() {
+        let root = repo("unresolved-gone");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/d", "main"], &root));
+        commit_on(&root, "feature/d", "d.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/d"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/d"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        assert!(git(&["branch", "-D", "feature/d"], &root));
+        let db = test_db();
+        let group = stopped_run_over(&db, "trunk/feature/d", &[(95, "done", "feature/d")]);
+
+        // The normal end state of a member that merged. merge-base cannot answer
+        // for a ref that no longer resolves, so it is skipped before it is asked.
+        assert!(unresolved_member_branches(&db, &group, &dir).is_empty());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
