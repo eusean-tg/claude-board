@@ -256,6 +256,13 @@ async fn task_detail(Path(id): Path<i64>) -> impl IntoResponse {
         obj.insert("commits".into(), commits);
         obj.insert("revisions".into(), to_json(&revisions));
         obj.insert("attachments".into(), to_json(&atts));
+        // The Tauri command adds this too, and the two have to agree. Missing here,
+        // the MCP tool's "currently running" line could never appear: whether a task
+        // is running is process state, and the row it serialises does not know.
+        obj.insert(
+            "is_running".into(),
+            serde_json::Value::Bool(crate::claude::runner::is_running(id)),
+        );
     }
     Json(val).into_response()
 }
@@ -346,11 +353,29 @@ fn artifact_data_dir() -> String {
     db::get_data_dir().to_string_lossy().to_string()
 }
 
+/// Every stored document for a project, each with the absolute path of its live copy.
+///
+/// The path is what makes the listing usable: an agent reads a document with its own
+/// file tools, so a record without one names something it then has to go and find.
+/// Saving and updating both answer with a path, and the prompt's Referenced Documents
+/// section lists paths, so this is the one artifact surface that did not — and the
+/// agent it serves went hunting through the home directory for the store.
+///
+/// Derived rather than stored: `stored_name` plus the store root is the path, and a
+/// second copy in the row could disagree with where the file actually is.
 async fn list_artifacts(Path(project_id): Path<i64>) -> impl IntoResponse {
-    Json(to_json(&db::artifacts::list_for_project(
-        &db::get_db(),
-        project_id,
-    )))
+    let data_dir = artifact_data_dir();
+    let mut out = Vec::new();
+    for artifact in db::artifacts::list_for_project(&db::get_db(), project_id) {
+        let path = super::artifact_store::resolve(&data_dir, &artifact.stored_name)
+            .map(|p| p.to_string_lossy().to_string());
+        let mut val = to_json(&artifact);
+        if let (Some(obj), Ok(path)) = (val.as_object_mut(), path) {
+            obj.insert("path".into(), serde_json::Value::String(path));
+        }
+        out.push(val);
+    }
+    Json(serde_json::Value::Array(out))
 }
 
 #[derive(serde::Deserialize)]
@@ -1006,6 +1031,132 @@ mod http_route_tests {
             status_of(&db, lone),
             "backlog",
             "the status must not move without the side effects that give it meaning"
+        );
+    }
+
+    /// The detail route's shape, which the MCP bridge reads.
+    ///
+    /// `commits` is a list on the wire, not the JSON string the column holds, and it is
+    /// a list even when the task has none. The bridge parsed it a second time, which on
+    /// an empty list asks `JSON.parse` to read `''` — so `get_task_detail` failed with
+    /// "Unexpected end of JSON input" for every task that had not committed anything,
+    /// which is most of them.
+    #[tokio::test]
+    async fn the_detail_route_serves_commits_as_a_list_even_when_there_are_none() {
+        let db = shared_db();
+        let (bare, committed) = (811, 812);
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+                 VALUES (1,'B','b','/repo')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+                 VALUES (?1,1,'nothing committed','backlog')",
+                rusqlite::params![bare],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id,project_id,title,status,commits)
+                 VALUES (?1,1,'has commits','done','[\"abc1234\",\"def5678\"]')",
+                rusqlite::params![committed],
+            )
+            .unwrap();
+        }
+
+        let base = serve().await;
+        let client = reqwest::Client::new();
+        let detail = |id: i64| {
+            let (client, url) = (client.clone(), format!("{}/api/tasks/{}/detail", base, id));
+            async move {
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let d = detail(bare).await;
+        assert_eq!(
+            d["commits"],
+            serde_json::json!([]),
+            "an empty list, not null and not a string"
+        );
+        // False for a task that is not running. This route used to serialise the
+        // struct's default and never ask the runner, so the answer was `false`
+        // whatever was happening — a claim only a live process can disprove, so the
+        // truthful case is checked by hand rather than here.
+        assert_eq!(d["is_running"], serde_json::json!(false));
+        assert_eq!(d["revisions"], serde_json::json!([]));
+        assert_eq!(d["attachments"], serde_json::json!([]));
+
+        let d = detail(committed).await;
+        assert_eq!(d["commits"], serde_json::json!(["abc1234", "def5678"]));
+    }
+
+    /// A listed document names where it lives.
+    ///
+    /// Without the path the bridge can only give an id and a title, and the agent has
+    /// no way to read the document except to search the filesystem for it — which is
+    /// what one did, four `find` commands and nineteen seconds deep, for a store at a
+    /// fixed location the app knew all along.
+    #[tokio::test]
+    async fn a_listed_document_says_where_to_read_it() {
+        let db = shared_db();
+        db.lock()
+            .execute(
+                "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+                 VALUES (1,'B','b','/repo')",
+                [],
+            )
+            .unwrap();
+        let base = serve().await;
+
+        let created: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/api/projects/1/artifacts", base))
+            .json(&serde_json::json!({
+                "title": "Where things live",
+                "kind": "doc",
+                "content": "# Where things live\n\nA note.\n",
+                "tags": ["reference"],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let saved_path = created["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("save must answer with a path, got {created}"))
+            .to_string();
+
+        let listed: serde_json::Value = reqwest::get(format!("{}/api/projects/1/artifacts", base))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mine = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == created["id"])
+            .expect("the document just saved is in the listing");
+
+        // The same path saving reported. Two surfaces disagreeing about where a
+        // document is would be worse than one of them staying quiet.
+        assert_eq!(mine["path"].as_str(), Some(saved_path.as_str()));
+        assert!(
+            std::path::Path::new(&saved_path).is_file(),
+            "and it names a file that exists: {saved_path}"
         );
     }
 
