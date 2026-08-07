@@ -42,6 +42,16 @@ A chain runs to the end whether or not [Auto-Queue](/features/queue) is on. Auto
 
 A task whose prerequisites are already met needs no chain and starts on its own, with no group and no shared branch.
 
+## Chains Auto-Queue starts
+
+[Auto-Queue](/features/queue) forms chains the same way, without the confirmation — there is no one to ask.
+
+It picks the task a person would have clicked: the one furthest down the graph, the one with nothing else waiting on it. That task gets a group and a trunk, and its leaves start immediately as members of it. Priority and queue position break ties, exactly as they do for ordinary queued work.
+
+One chain at a time. Forming a group claims every task in it, so two tasks at the end of a graph that share prerequisites cannot both have them — the first takes them, and the second waits until that run finishes rather than competing for them.
+
+A run that has stopped is left alone. Its tasks stay claimed and the queue passes over them, because giving up on a stopped run is a decision for you to make and its trunk holds the work that did merge.
+
 ## The shared branch
 
 The reason a chain works at all is where its tasks branch from.

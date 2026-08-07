@@ -284,61 +284,29 @@ pub fn start_task_with_prerequisites(
     id: i64,
     mcp_port: u16,
 ) -> Result<serde_json::Value, String> {
-    use crate::services::orchestration;
+    use crate::services::orchestration::{self, ChainStart};
     let db = db::get_db();
-    let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
-    let project = pq::get_by_id(&db, task.project_id).ok_or("Project not found")?;
-
-    let waves = orchestration::plan_prerequisites(&db, id);
-    let member_ids: Vec<i64> = waves.iter().flatten().map(|t| t.id).collect();
-
-    if member_ids.len() <= 1 {
-        let started = change_task_status(app, id, "in_progress".into(), mcp_port)?;
-        return Ok(serde_json::json!({
+    match orchestration::start_chain(&db, &app, id, mcp_port, orchestration::StopPolicy::Abandon)? {
+        ChainStart::Single { task_id } => Ok(serde_json::json!({
             "groupId": null,
-            "queued": [started.id],
+            "queued": [task_id],
             "trunkBranch": null,
-        }));
-    }
-
-    let claimed = orchestration::claimed_members(&db, &member_ids);
-    if !claimed.is_empty() {
-        return Err(format!(
+        })),
+        ChainStart::Grouped {
+            group_id,
+            queued,
+            trunk,
+        } => Ok(serde_json::json!({
+            "groupId": group_id,
+            "queued": queued,
+            "trunkBranch": trunk,
+        })),
+        // Only the person who clicked needs telling; the queue skips these quietly.
+        ChainStart::Claimed(claimed) => Err(format!(
             "{} of these tasks already belong to another run",
             claimed.len()
-        ));
+        )),
     }
-    // A stopped run keeps hold of its members so the board can mark them, and
-    // UNIQUE(task_id) would refuse the new membership rows. Starting a fresh run over
-    // those tasks is a decision to give up on the stopped one, so close it here
-    // rather than failing with a constraint error nobody can act on.
-    for closed in db::task_groups::abandon_stopped(&db, &member_ids) {
-        log::info!(
-            "closed stopped run {} to start a new one over its tasks",
-            closed
-        );
-    }
-
-    let trunk = orchestration::trunk_branch_name(&task);
-    let base = project
-        .pr_base_branch
-        .clone()
-        .unwrap_or_else(|| "main".into());
-    orchestration::create_trunk_branch(&project.working_dir, &trunk, &base)?;
-
-    let group_id = db::task_groups::create(&db, task.project_id, &trunk, &base, id, &member_ids)
-        .map_err(|e| e.to_string())?;
-
-    orchestration::prepare_members(&db, &member_ids);
-    // Scoped to this group and not gated on auto_queue: the user asked for this
-    // chain, and auto_queue governs starting work nobody asked for.
-    queue::start_group_members(&db, &app, task.project_id, group_id);
-
-    Ok(serde_json::json!({
-        "groupId": group_id,
-        "queued": member_ids,
-        "trunkBranch": trunk,
-    }))
 }
 
 /// The stopped run a task belongs to, or a refusal naming why there is nothing to do.

@@ -115,6 +115,125 @@ pub fn create_trunk_branch(working_dir: &str, trunk: &str, base: &str) -> Result
     }
 }
 
+/// What a chain start did.
+pub enum ChainStart {
+    /// No group was needed — the task's prerequisites were already met, so one branch
+    /// off the base branch is correct and a trunk plus two merges would be ceremony
+    /// with two extra chances to conflict.
+    Single { task_id: i64 },
+    Grouped {
+        group_id: i64,
+        queued: Vec<i64>,
+        trunk: String,
+    },
+    /// Some members belong to a live run already. Nothing was changed.
+    Claimed(Vec<i64>),
+}
+
+/// What to do about a stopped run holding the tasks a new chain wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopPolicy {
+    /// Close it and take its tasks. A person starting a fresh chain over them has
+    /// decided to give up on the stopped one, and `UNIQUE(task_id)` would otherwise
+    /// refuse the new membership rows with a constraint error nobody can act on.
+    Abandon,
+    /// Leave it alone and start nothing. The queue must never abandon a run: a stopped
+    /// run is waiting for a person, and its trunk holds work that did merge.
+    Refuse,
+}
+
+/// Members a new chain cannot have, so the caller can stop before cutting a branch.
+///
+/// A live run's members are unavailable to anyone. A *stopped* run's members are
+/// unavailable only under [`StopPolicy::Refuse`], which is what the queue passes —
+/// under `Abandon` the caller goes on to close that run and take them.
+///
+/// The stopped case is not covered by [`claimed_members`], which asks about `active`
+/// groups only, and it is the case that matters: a chain whose *ancestors* sit in a
+/// stopped run while its own target does not looks completely free from the outside.
+/// Without this the queue would reach `abandon_stopped` and throw away a run that is
+/// waiting for a person, along with the only record of which branch never merged.
+pub fn unavailable_members(db: &DbPool, member_ids: &[i64], on_stopped: StopPolicy) -> Vec<i64> {
+    member_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            crate::db::task_groups::for_task(db, *id).is_some()
+                || (on_stopped == StopPolicy::Refuse
+                    && crate::db::task_groups::stopped_for_task(db, *id).is_some())
+        })
+        .collect()
+}
+
+/// Run `task_id` by running everything it depends on first, on a shared trunk.
+///
+/// Shared by the Start button and Auto-Queue, so that the queue produces the same thing
+/// a person does. It used to be the button's alone, and the queue started bare leaves
+/// off the base branch instead — see [`crate::db::dependencies::get_chain_targets`].
+pub fn start_chain(
+    db: &DbPool,
+    app: &tauri::AppHandle,
+    task_id: i64,
+    mcp_port: u16,
+    on_stopped: StopPolicy,
+) -> Result<ChainStart, String> {
+    let task = tasks::get_by_id(db, task_id).ok_or("Task not found")?;
+    let project = crate::db::projects::get_by_id(db, task.project_id).ok_or("Project not found")?;
+
+    let waves = plan_prerequisites(db, task_id);
+    let member_ids: Vec<i64> = waves.iter().flatten().map(|t| t.id).collect();
+
+    if member_ids.len() <= 1 {
+        let started = crate::commands::tasks::change_status_inner(
+            Some(app),
+            task_id,
+            crate::claude::state_machine::TaskStatus::InProgress.as_str(),
+            mcp_port,
+            crate::commands::tasks::StartOverride::None,
+        )?;
+        return Ok(ChainStart::Single {
+            task_id: started.id,
+        });
+    }
+
+    // Checked before the trunk is cut: a stopped run keeps hold of its members, so the
+    // group rows below would fail on UNIQUE(task_id) after the branch already existed.
+    let blocked = unavailable_members(db, &member_ids, on_stopped);
+    if !blocked.is_empty() {
+        return Ok(ChainStart::Claimed(blocked));
+    }
+    if on_stopped == StopPolicy::Abandon {
+        for closed in crate::db::task_groups::abandon_stopped(db, &member_ids) {
+            log::info!(
+                "closed stopped run {} to start a new one over its tasks",
+                closed
+            );
+        }
+    }
+
+    let trunk = trunk_branch_name(&task);
+    let base = project
+        .pr_base_branch
+        .clone()
+        .unwrap_or_else(|| "main".into());
+    create_trunk_branch(&project.working_dir, &trunk, &base)?;
+
+    let group_id =
+        crate::db::task_groups::create(db, task.project_id, &trunk, &base, task_id, &member_ids)
+            .map_err(|e| e.to_string())?;
+
+    prepare_members(db, &member_ids);
+    // Scoped to this group and not gated on auto_queue: a chain that has been started
+    // has to reach its end, and auto_queue governs starting work nobody asked for.
+    crate::services::queue::start_group_members(db, app, task.project_id, group_id);
+
+    Ok(ChainStart::Grouped {
+        group_id,
+        queued: member_ids,
+        trunk,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +534,74 @@ mod tests {
         );
 
         assert_eq!(name, "trunk/feature/do-the-thing");
+    }
+
+    /// A stopped run over `members`, targeting the last of them.
+    fn stopped_run(db: &crate::db::DbPool, members: &[i64]) -> i64 {
+        let target = *members.last().unwrap();
+        let gid = crate::db::task_groups::create(db, 1, "trunk/stopped", "main", target, members)
+            .unwrap();
+        crate::db::task_groups::set_status(db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+        gid
+    }
+
+    #[test]
+    fn the_queue_will_not_take_a_stopped_runs_tasks() {
+        let db = test_db();
+        let a = seed(&db, "dep a", "done");
+        let c = seed(&db, "dep c", "backlog");
+        let d = seed(&db, "dep d", "backlog");
+        // The run holds a and c. d depends on c but was never a member, so nothing about
+        // d itself says the work it needs is stuck.
+        stopped_run(&db, &[a, c]);
+
+        let blocked = unavailable_members(&db, &[a, c, d], StopPolicy::Refuse);
+
+        // Reaching abandon_stopped here would close a run that is waiting for a person
+        // and take the only record of which branch never merged.
+        assert_eq!(blocked, vec![a, c]);
+    }
+
+    #[test]
+    fn a_person_starting_a_fresh_chain_may_take_them() {
+        let db = test_db();
+        let a = seed(&db, "dep a", "done");
+        let c = seed(&db, "dep c", "backlog");
+        stopped_run(&db, &[a, c]);
+
+        // Same tasks, opposite answer: starting a new chain over them is a decision to
+        // give up on the stopped run, and the caller closes it next.
+        assert!(unavailable_members(&db, &[a, c], StopPolicy::Abandon).is_empty());
+    }
+
+    #[test]
+    fn a_live_runs_tasks_are_off_limits_to_everyone() {
+        let db = test_db();
+        let a = seed(&db, "dep a", "backlog");
+        let c = seed(&db, "dep c", "backlog");
+        crate::db::task_groups::create(&db, 1, "trunk/live", "main", c, &[a, c]).unwrap();
+
+        // A task with two trunks has no correct merge target, so neither policy takes
+        // these — abandoning applies to stopped runs only.
+        for policy in [StopPolicy::Refuse, StopPolicy::Abandon] {
+            assert_eq!(
+                unavailable_members(&db, &[a, c], policy),
+                vec![a, c],
+                "{policy:?} took a live run's tasks"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_runs_tasks_are_free_again() {
+        let db = test_db();
+        let a = seed(&db, "dep a", "done");
+        let c = seed(&db, "dep c", "backlog");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/old", "main", c, &[a, c]).unwrap();
+        crate::db::task_groups::finish(&db, gid, crate::db::task_groups::STATUS_COMPLETED).unwrap();
+
+        // Otherwise every task that ever ran in a chain would be claimed for good.
+        assert!(unavailable_members(&db, &[a, c], StopPolicy::Refuse).is_empty());
     }
 }
