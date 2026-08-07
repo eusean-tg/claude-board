@@ -34,7 +34,6 @@ pub(crate) fn app_handle() -> Option<tauri::AppHandle> {
 use tauri::menu::{MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
-use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "macos")]
 fn build_macos_menu(app: &tauri::App) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
@@ -256,59 +255,21 @@ pub fn run() {
                     }
                 });
 
-                // Check for updates in background
-                let app_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    let updater = match app_handle.updater() {
-                        Ok(u) => u,
-                        Err(e) => {
-                            log::warn!("Updater init failed: {}", e);
-                            return;
-                        }
-                    };
-                    match updater.check().await {
-                        Ok(Some(update)) => {
-                            let version = update.version.clone();
-                            log::info!("Update available: {}", version);
-                            app_handle
-                                .emit(
-                                    "update:available",
-                                    &serde_json::json!({
-                                        "version": version, "status": "downloading",
-                                    }),
-                                )
-                                .ok();
-                            // Download and install
-                            match update.download_and_install(|_, _| {}, || {}).await {
-                                Ok(_) => {
-                                    log::info!("Update installed, restart required");
-                                    app_handle
-                                        .emit(
-                                            "update:ready",
-                                            &serde_json::json!({
-                                                "version": version,
-                                            }),
-                                        )
-                                        .ok();
-                                }
-                                Err(e) => {
-                                    log::warn!("Update install failed: {}", e);
-                                    app_handle
-                                        .emit(
-                                            "update:available",
-                                            &serde_json::json!({
-                                                "version": version, "status": "available",
-                                            }),
-                                        )
-                                        .ok();
-                                }
-                            }
-                        }
-                        Ok(None) => log::info!("App is up to date"),
-                        Err(e) => log::warn!("Update check failed: {}", e),
-                    }
-                });
+                // The automatic update check is off, deliberately.
+                //
+                // It ran two seconds after every launch and, on finding a higher
+                // version, called `download_and_install` with no prompt — so the
+                // running build replaced itself. That was inherited from the upstream
+                // project this repo forked from, along with an endpoint pointing at
+                // *upstream's* releases and upstream's public key, which together
+                // would have installed their binary over this one the first time they
+                // tagged a release ahead of this version.
+                //
+                // The endpoint in tauri.conf.json now names this repository, and the
+                // plugin stays registered so the capability and the frontend's update
+                // banner keep working. To turn this back on, restore the check here —
+                // and generate a signing key first, because `pubkey` there is still
+                // upstream's and nothing this repo builds can satisfy it.
             } else {
                 tauri::WebviewWindowBuilder::new(
                     app,
