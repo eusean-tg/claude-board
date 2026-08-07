@@ -9,6 +9,9 @@
  * Tools: list_projects, list_tasks, create_task, update_task, change_task_status,
  *        get_task_detail, delete_task, list_task_summary, list_artifacts, save_artifact,
  *        update_artifact, raise_blocker
+ *
+ * Each is registered through the local `tool()` helper, which requires the display
+ * name clients show alongside the tool's own identifier.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -50,8 +53,22 @@ const server = new McpServer({
   version: '4.0.0',
 });
 
+/// Register a tool, with the display name clients show for it.
+///
+/// A positional argument rather than a lookup table keyed by tool name: a table has
+/// to be remembered, and the one thing certain about a table maintained by hand is
+/// that the next tool added will not be in it. Here a tool without a display name
+/// does not call.
+///
+/// `title` is the protocol's own field for this, so what a client does with it is the
+/// client's decision — one that shows raw names loses nothing by our sending it.
+function tool(name, title, description, inputSchema, handler) {
+  if (!title) throw new Error(`tool ${name} was registered without a display name`);
+  return server.registerTool(name, { title, description, inputSchema }, handler);
+}
+
 // ─── list_projects ───
-server.tool('list_projects', 'List all projects with task counts and stats', {}, async () => {
+tool('list_projects', 'List Projects', 'List all projects with task counts and stats', {}, async () => {
   const projects = await api('/api/projects/summary');
   const text = projects
     .map(
@@ -63,8 +80,9 @@ server.tool('list_projects', 'List all projects with task counts and stats', {},
 });
 
 // ─── list_tasks ───
-server.tool(
+tool(
   'list_tasks',
+  'List Tasks',
   'List all tasks for a project. Returns task keys, titles, status, type, and model.',
   { project_id: z.number().describe('Project ID') },
   async ({ project_id }) => {
@@ -80,8 +98,9 @@ server.tool(
 );
 
 // ─── create_task ───
-server.tool(
+tool(
   'create_task',
+  'Create Task',
   'Create a new task in a project. Use parent_task_id to create sub-tasks that are linked to a parent — the parent will automatically wait for all sub-tasks to complete.',
   {
     project_id: z.number().describe('Project ID to create the task in'),
@@ -130,8 +149,9 @@ server.tool(
 );
 
 // ─── update_task ───
-server.tool(
+tool(
   'update_task',
+  'Update Task',
   'Update an existing task (title, description, type, priority, model).',
   {
     task_id: z.number().describe('Task ID to update'),
@@ -160,8 +180,9 @@ server.tool(
 );
 
 // ─── change_task_status ───
-server.tool(
+tool(
   'change_task_status',
+  'Change Task Status',
   'Move a task to a different status column (backlog, in_progress, testing, done). ' +
     'Not every move is allowed: the board refuses illegal transitions, a task whose ' +
     'dependencies have not finished, and a task belonging to a dependency run that ' +
@@ -184,8 +205,9 @@ server.tool(
 );
 
 // ─── get_task_detail ───
-server.tool(
+tool(
   'get_task_detail',
+  'Get Task Detail',
   'Get full details of a task including commits, revisions, attachments, and usage stats.',
   { task_id: z.number().describe('Task ID') },
   async ({ task_id }) => {
@@ -217,8 +239,9 @@ server.tool(
 );
 
 // ─── delete_task ───
-server.tool(
+tool(
   'delete_task',
+  'Delete Task',
   'Permanently delete a task. This cannot be undone.',
   { task_id: z.number().describe('Task ID to delete') },
   async ({ task_id }) => {
@@ -228,8 +251,9 @@ server.tool(
 );
 
 // ─── list_task_summary ───
-server.tool(
+tool(
   'list_task_summary',
+  'Task Summary',
   'Get a summary of tasks grouped by status for a project.',
   { project_id: z.number().describe('Project ID') },
   async ({ project_id }) => {
@@ -259,8 +283,9 @@ server.tool(
 // saved as an artifact is noise, and a plan written only into the repo is lost
 // when its branch is.
 
-server.tool(
+tool(
   'list_artifacts',
+  'List Documents',
   'List markdown documents stored for a project — plans, RFCs, specs and notes saved ' +
     'by earlier tasks. Each entry gives an id, title, kind, tags, and the absolute ' +
     'path of the live copy on the second line. Read or edit a document with your own ' +
@@ -289,8 +314,9 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'save_artifact',
+  'Save Document',
   'Save a markdown document to Claude Board so the user can browse it and later tasks ' +
     'can reference it. Use this for documents about the work — a plan, an RFC, a spec, ' +
     'research notes, a progress log. Do NOT use it for files that belong in the ' +
@@ -323,8 +349,9 @@ server.tool(
   },
 );
 
-server.tool(
+tool(
   'update_artifact',
+  'Update Document',
   'Revise a stored document. Pass only what changes: sending just `content` rewrites ' +
     'the body and leaves the title, kind and tags as they are. Use this rather than ' +
     'saving a second copy when a document already exists.',
@@ -348,8 +375,9 @@ server.tool(
 );
 
 // ─── raise_blocker ───
-server.tool(
+tool(
   'raise_blocker',
+  'Ask the User',
   'Ask the user a question and wait for their answer. Use this when you cannot make ' +
     'progress without a decision only they can make — an ambiguous requirement, a ' +
     'choice between approaches with real trade-offs, a missing credential, work that ' +
