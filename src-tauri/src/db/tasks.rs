@@ -67,6 +67,10 @@ pub struct Task {
     /// ordinary one sitting in Backlog.
     #[serde(default)]
     pub run_stopped: bool,
+    /// The task created to resolve that run's conflict, when there is one. The panel
+    /// reads it to say who is already resolving rather than offering a second go.
+    #[serde(default)]
+    pub resolve_task_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +146,7 @@ pub fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         waiting_on: 0,
         trunk_branch: None,
         run_stopped: false,
+        resolve_task_id: None,
     })
 }
 
@@ -164,12 +169,14 @@ pub fn get_for_ui(db: &DbPool, task_id: i64) -> Option<Task> {
 /// Fill the computed fields on a task that was read some other way.
 pub fn hydrate(db: &DbPool, task: &mut Task) {
     task.waiting_on = super::dependencies::unmet_parent_ids(db, task.id).len() as i64;
-    if let Some((trunk, status)) = super::task_groups::run_for_task(db, task.id) {
+    if let Some((trunk, status, resolve_task_id)) = super::task_groups::run_for_task(db, task.id) {
         task.trunk_branch = Some(trunk);
         task.run_stopped = status == super::task_groups::STATUS_STOPPED;
+        task.resolve_task_id = resolve_task_id;
     } else {
         task.trunk_branch = None;
         task.run_stopped = false;
+        task.resolve_task_id = None;
     }
 }
 

@@ -6,21 +6,27 @@ use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
 pub fn get_tasks(project_id: i64) -> Vec<tq::Task> {
-    let db = db::get_db();
+    hydrate_board(&db::get_db(), project_id)
+}
+
+/// Every task on a board, with the fields the board computes rather than stores.
+///
+/// Split from the command so the hydration can be tested against a pool of its own;
+/// it is the list-sized equivalent of `tq::hydrate`, and the two have to agree.
+pub(crate) fn hydrate_board(db: &db::DbPool, project_id: i64) -> Vec<tq::Task> {
     // Both of these are one query for the whole board rather than one per card.
-    let waiting = db::dependencies::unmet_parent_counts(&db, project_id);
-    let trunks = db::task_groups::trunks_by_task(&db, project_id);
-    tq::get_by_project(&db, project_id)
+    let waiting = db::dependencies::unmet_parent_counts(db, project_id);
+    let trunks = db::task_groups::trunks_by_task(db, project_id);
+    tq::get_by_project(db, project_id)
         .into_iter()
         .map(|mut t| {
             t.is_running = runner::is_running(t.id) || runner::is_starting(t.id);
             t.waiting_on = waiting.get(&t.id).copied().unwrap_or(0);
-            if let Some((trunk, run_status)) = trunks.get(&t.id) {
+            if let Some((trunk, run_status, resolve_task_id)) = trunks.get(&t.id) {
                 t.trunk_branch = Some(trunk.clone());
                 t.run_stopped = run_status == crate::db::task_groups::STATUS_STOPPED;
+                t.resolve_task_id = *resolve_task_id;
             }
-            // Note: the batch queries above are the list-sized equivalent of
-            // tq::hydrate, which the single-task paths use.
             t
         })
         .collect()
@@ -1429,6 +1435,26 @@ mod tests {
         assert_eq!(hydrated.waiting_on, 1);
         assert_eq!(hydrated.trunk_branch.as_deref(), Some("trunk/m"));
         assert!(hydrated.run_stopped);
+        assert_eq!(hydrated.resolve_task_id, None);
+
+        // And once a resolution exists, every member's card carries its id: that is
+        // how the panel says who is already resolving instead of offering a second.
+        let r = seed_task(&db, "resolve");
+        db::task_groups::add_member(&db, gid, r).unwrap();
+        db::task_groups::set_resolve_task(&db, gid, r).unwrap();
+        assert_eq!(
+            tq::get_for_ui(&db, child).unwrap().resolve_task_id,
+            Some(r),
+            "the single-task read"
+        );
+        assert_eq!(
+            hydrate_board(&db, 1)
+                .into_iter()
+                .find(|t| t.id == child)
+                .and_then(|t| t.resolve_task_id),
+            Some(r),
+            "and the board query, which is a different query"
+        );
     }
 
     #[test]

@@ -151,7 +151,7 @@ export default {
   'prerequisites.cancel': 'Cancel',
   'runStopped.title': 'This run stopped',
   'runStopped.body':
-    "A task's work could not be merged into the shared branch, so the tasks after it were not started. Merge it by hand, then carry the run on — or give up on the run and free its tasks.",
+    "A task's work could not be merged into the shared branch, so the tasks after it were not started. Resolve it with a task, or merge it by hand and carry the run on — or give up on the run and free its tasks.",
   'runStopped.trunk': 'Shared branch:',
   'runStopped.resume': 'Carry on',
   'runStopped.resuming': 'Merging...',
@@ -161,6 +161,14 @@ export default {
   'runStopped.startAnywayWarning':
     'You can start this task on the shared branch as it is. The branch is missing work this task was told it depends on, so the agent may build on something that is not there. The run stays stopped either way.',
   'runStopped.startAnyway': 'Start anyway',
+  'runStopped.resolve': 'Resolve',
+  'runStopped.resolveHint':
+    'Creates a task that merges the refused branch into the shared branch and resolves the conflict. It can ask you when a resolution is ambiguous, and the waiting tasks run once it verifies.',
+  'runStopped.resolving':
+    'Being resolved by "{title}". It may ask you a question or wait for your approval — abandon the run to give up.',
+  'runStopped.resolveSpent':
+    'This run already used its resolve attempt. Merge by hand and carry on, or abandon the run.',
+  'toast.resolveStarted': 'Resolve task started — the run carries on when the merge verifies',
   'toast.runResumed': 'Run resumed — {count} task(s) started',
   'toast.runAbandoned': 'Run abandoned. {trunk} still holds its work.',
   'toast.runOverridden': 'Started {title} on an incomplete shared branch',

@@ -30,6 +30,10 @@ export function useTaskHandlers({
       setRunStopped({
         task,
         startable,
+        // The board already holds every task, so the run's resolution is a lookup
+        // rather than a fetch. Null until one exists, which is what puts the Resolve
+        // button in the panel rather than a hint about who is already resolving.
+        resolveTask: tasks.find((x) => x.id === task.resolve_task_id) ?? null,
         onClose: () => setRunStopped(null),
         onResolved: async ({ kind, result }) => {
           setRunStopped(null);
@@ -37,6 +41,8 @@ export function useTaskHandlers({
             addToast(t('toast.runResumed', { count: result?.started?.length ?? 0 }), 'success');
           } else if (kind === 'startedAnyway') {
             addToast(t('toast.runOverridden', { title: task.title }), 'info');
+          } else if (kind === 'resolveStarted') {
+            addToast(t('toast.resolveStarted'), 'success');
           } else {
             addToast(t('toast.runAbandoned', { trunk: result?.trunk ?? '' }), 'success');
           }
@@ -49,7 +55,7 @@ export function useTaskHandlers({
         },
       });
     },
-    [setRunStopped, addToast, t, setTasks],
+    [setRunStopped, addToast, t, setTasks, tasks],
   );
 
   const onStatusChange = useCallback(

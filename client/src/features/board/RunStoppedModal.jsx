@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertTriangle, GitBranch, Play, Trash2 } from 'lucide-react';
+import { AlertTriangle, GitBranch, Play, Trash2, Wand2 } from 'lucide-react';
 import ModalShell from '../../components/ModalShell';
 import { api } from '../../lib/api';
 import { useTranslation } from '../../i18n/I18nProvider';
@@ -13,19 +13,29 @@ import { useTranslation } from '../../i18n/I18nProvider';
  * fixed whatever caused the conflict. Abandoning releases the tasks and keeps the
  * trunk, because that trunk holds every member's work that did merge.
  *
- * `startable` adds a third way out, and only when the panel was opened by trying to
+ * Resolve is the third way, and the only one that does the merge for you: it puts a
+ * task on the board whose job is to merge the refused branch into the shared branch.
+ * It is offered until the run has used its attempt — `resolveTask` is that task once
+ * it exists, and what it is doing decides whether the slot shows a button, a hint
+ * naming who is resolving, or the spent-attempt line.
+ *
+ * `startable` adds a fourth way out, and only when the panel was opened by trying to
  * start the task: this is the confirmation for that start, so it says what the trunk
  * is missing before offering to run against it anyway. Opened from the marker on a
  * card instead, there is no start to confirm and the option would read as an
  * invitation to make things worse.
  */
-export default function RunStoppedModal({ task, onClose, onResolved, startable }) {
+export default function RunStoppedModal({ task, onClose, onResolved, startable, resolveTask }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirmingAbandon, setConfirmingAbandon] = useState(false);
 
   if (!task) return null;
+
+  const resolveStatus = resolveTask?.status;
+  const resolving = ['in_progress', 'blocked', 'testing', 'awaiting_approval'].includes(resolveStatus);
+  const spent = resolveStatus === 'done';
 
   const resume = async () => {
     if (busy) return;
@@ -49,6 +59,22 @@ export default function RunStoppedModal({ task, onClose, onResolved, startable }
     try {
       const result = await api.abandonRun(task.id);
       onResolved?.({ kind: 'abandoned', result });
+    } catch (e) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The run stays stopped while it works, which is what keeps the other members held
+  // and what makes a resolution of a resolution impossible.
+  const resolve = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.resolveStoppedRun(task.id);
+      onResolved?.({ kind: 'resolveStarted', result });
     } catch (e) {
       setError(e?.message || String(e));
     } finally {
@@ -94,6 +120,31 @@ export default function RunStoppedModal({ task, onClose, onResolved, startable }
             {error}
           </p>
         ) : null}
+
+        {/* A resolution that is running, blocked on a question or waiting for review
+            is in flight, not spent: the run's next move is that task's, so the slot
+            names it rather than offering a second one. Done and still stopped means
+            the attempt was made and rejected — one per run. Backlog or failed never
+            produced a resolution to judge, so it can be run again. */}
+        <div className="mt-4 border-t border-surface-800 pt-3">
+          {resolving ? (
+            <p className="text-xs text-surface-400">{t('runStopped.resolving', { title: resolveTask.title })}</p>
+          ) : spent ? (
+            <p className="text-xs text-surface-400">{t('runStopped.resolveSpent')}</p>
+          ) : (
+            <>
+              <p className="text-xs text-surface-400">{t('runStopped.resolveHint')}</p>
+              <button
+                onClick={resolve}
+                disabled={busy}
+                className="mt-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-claude hover:bg-claude-light text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Wand2 size={12} />
+                {t('runStopped.resolve')}
+              </button>
+            </>
+          )}
+        </div>
 
         {startable ? (
           <div className="mt-4 border-t border-surface-800 pt-3">

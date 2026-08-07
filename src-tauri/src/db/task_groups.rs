@@ -148,6 +148,10 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
     .ok()
 }
 
+/// What a card needs to know about the run its task belongs to: the trunk, the run's
+/// status, and the task resolving its conflict if one was created.
+pub type RunForTask = (String, String, Option<i64>);
+
 /// Trunk branch and run status per task, for every task in a live or stopped group.
 ///
 /// Stopped runs are included because a card whose run needs attention is exactly
@@ -155,13 +159,10 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
 /// moment it mattered most.
 ///
 /// One query for the whole board rather than `for_task` per card.
-pub fn trunks_by_task(
-    db: &DbPool,
-    project_id: i64,
-) -> std::collections::HashMap<i64, (String, String)> {
+pub fn trunks_by_task(db: &DbPool, project_id: i64) -> std::collections::HashMap<i64, RunForTask> {
     let conn = db.lock();
     let mut stmt = match conn.prepare(
-        "SELECT m.task_id, g.trunk_branch, g.status FROM task_groups g
+        "SELECT m.task_id, g.trunk_branch, g.status, g.resolve_task_id FROM task_groups g
          JOIN task_group_members m ON m.group_id = g.id
          WHERE g.project_id = ?1 AND g.status IN ('active','stopped')",
     ) {
@@ -175,7 +176,11 @@ pub fn trunks_by_task(
     match stmt.query_map(params![project_id], |r| {
         Ok((
             r.get::<_, i64>(0)?,
-            (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+            (
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ),
         ))
     }) {
         Ok(rows) => out.extend(rows.flatten()),
@@ -205,14 +210,20 @@ pub fn stopped_for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
 ///
 /// The single-task counterpart of [`trunks_by_task`], for the paths that emit one
 /// task rather than a board's worth.
-pub fn run_for_task(db: &DbPool, task_id: i64) -> Option<(String, String)> {
+pub fn run_for_task(db: &DbPool, task_id: i64) -> Option<RunForTask> {
     let conn = db.lock();
     conn.query_row(
-        "SELECT g.trunk_branch, g.status FROM task_groups g
+        "SELECT g.trunk_branch, g.status, g.resolve_task_id FROM task_groups g
          JOIN task_group_members m ON m.group_id = g.id
          WHERE m.task_id = ?1 AND g.status IN ('active','stopped')",
         params![task_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        },
     )
     .ok()
 }
@@ -524,11 +535,11 @@ mod tests {
 
         assert_eq!(
             map.get(&a),
-            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string(), None))
         );
         assert_eq!(
             map.get(&b),
-            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string(), None))
         );
         // A landed group's trunk is deleted, so showing it on a card would name a
         // branch that is gone.
@@ -593,7 +604,11 @@ mod tests {
         // Filtering to active made the marker disappear exactly then.
         assert_eq!(
             map.get(&a),
-            Some(&("trunk/stopped".to_string(), STATUS_STOPPED.to_string()))
+            Some(&(
+                "trunk/stopped".to_string(),
+                STATUS_STOPPED.to_string(),
+                None
+            ))
         );
         // And the trunk still resolves, so a member finishing late lands on it
         // rather than on the project's base branch.
