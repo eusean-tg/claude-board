@@ -1016,6 +1016,17 @@ pub fn stop_group_after_failed_merge(
             &serde_json::json!({"taskId": task_id, "message": msg, "logType": "error"}),
         )
         .ok();
+        // Every member's card carries the marker, and the board is event-driven — it
+        // never polls. Without this the stop reaches the log, the activity timeline and
+        // a desktop notification, and no card: the run looks untouched until something
+        // else happens to refetch the list, which is exactly the "nothing else on the
+        // board looks wrong" the message above warns about.
+        //
+        // All members, not just this one. The marker is how the other three explain why
+        // they are not running, and each is the button that opens the resolution panel.
+        for member in crate::db::task_groups::members(db, group.id) {
+            emit_task_updated(db, app, member);
+        }
     }
     log::warn!("group {} stopped: {}", group.id, msg);
     true
@@ -3679,6 +3690,15 @@ mod tests {
         // Membership survives, because that is what tells the board which cards are
         // stranded and what resolving the run has to act on.
         assert_eq!(crate::db::task_groups::members(&db, group), vec![71, 72]);
+        // What the task:updated payload for each member carries. The stop emits one per
+        // member — an assertion a test cannot make without a Tauri app — and this is the
+        // half that can be checked: every card has something to render, including the
+        // one whose merge was refused and the one that never started.
+        for member in crate::db::task_groups::members(&db, group) {
+            let ui = crate::db::tasks::get_for_ui(&db, member).unwrap();
+            assert!(ui.run_stopped, "task {member} would render no marker");
+            assert_eq!(ui.trunk_branch.as_deref(), Some("trunk/feature/st"));
+        }
         // Task 72 was going to build on work that is not on the trunk. Nothing may
         // start it as part of this run.
         assert!(crate::db::task_groups::for_task(&db, 72).is_none());
