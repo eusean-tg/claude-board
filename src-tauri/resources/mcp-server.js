@@ -262,8 +262,10 @@ server.tool(
 server.tool(
   'list_artifacts',
   'List markdown documents stored for a project — plans, RFCs, specs and notes saved ' +
-    'by earlier tasks. Returns ids, titles, kinds, tags and absolute paths; read a ' +
-    "document's content with your own file tools at the path given.",
+    'by earlier tasks. Each entry gives an id, title, kind, tags, and the absolute ' +
+    'path of the live copy on the second line. Read or edit a document with your own ' +
+    'file tools at that path. Never search the filesystem for the store: the path here ' +
+    'is the answer, and a copy you find elsewhere is not the one the board tracks.',
   {
     projectId: z.number().describe('Project ID'),
     tag: z.string().optional().describe('Only documents carrying this tag'),
@@ -271,7 +273,16 @@ server.tool(
   async ({ projectId, tag }) => {
     const artifacts = await api(`/api/projects/${projectId}/artifacts`);
     const wanted = tag ? artifacts.filter((a) => asList(a.tags).includes(tag)) : artifacts;
-    const text = wanted.map((a) => `[${a.id}] ${a.title || a.stored_name} (${a.kind}) ${a.tags || '[]'}`).join('\n');
+    // The path is the point of the listing: it is how the document gets read. Leaving
+    // it out sent agents hunting through the home directory for the store, which the
+    // tool's own description said they would not have to do.
+    const text = wanted
+      .map((a) =>
+        [`[${a.id}] ${a.title || a.stored_name} (${a.kind}) ${a.tags || '[]'}`, a.path ? `\n    ${a.path}` : '']
+          .join('')
+          .trimEnd(),
+      )
+      .join('\n');
     return {
       content: [{ type: 'text', text: text || 'No documents stored for this project.' }],
     };

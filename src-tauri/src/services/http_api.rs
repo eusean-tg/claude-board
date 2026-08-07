@@ -353,11 +353,29 @@ fn artifact_data_dir() -> String {
     db::get_data_dir().to_string_lossy().to_string()
 }
 
+/// Every stored document for a project, each with the absolute path of its live copy.
+///
+/// The path is what makes the listing usable: an agent reads a document with its own
+/// file tools, so a record without one names something it then has to go and find.
+/// Saving and updating both answer with a path, and the prompt's Referenced Documents
+/// section lists paths, so this is the one artifact surface that did not — and the
+/// agent it serves went hunting through the home directory for the store.
+///
+/// Derived rather than stored: `stored_name` plus the store root is the path, and a
+/// second copy in the row could disagree with where the file actually is.
 async fn list_artifacts(Path(project_id): Path<i64>) -> impl IntoResponse {
-    Json(to_json(&db::artifacts::list_for_project(
-        &db::get_db(),
-        project_id,
-    )))
+    let data_dir = artifact_data_dir();
+    let mut out = Vec::new();
+    for artifact in db::artifacts::list_for_project(&db::get_db(), project_id) {
+        let path = super::artifact_store::resolve(&data_dir, &artifact.stored_name)
+            .map(|p| p.to_string_lossy().to_string());
+        let mut val = to_json(&artifact);
+        if let (Some(obj), Ok(path)) = (val.as_object_mut(), path) {
+            obj.insert("path".into(), serde_json::Value::String(path));
+        }
+        out.push(val);
+    }
+    Json(serde_json::Value::Array(out))
 }
 
 #[derive(serde::Deserialize)]
@@ -1081,6 +1099,65 @@ mod http_route_tests {
 
         let d = detail(committed).await;
         assert_eq!(d["commits"], serde_json::json!(["abc1234", "def5678"]));
+    }
+
+    /// A listed document names where it lives.
+    ///
+    /// Without the path the bridge can only give an id and a title, and the agent has
+    /// no way to read the document except to search the filesystem for it — which is
+    /// what one did, four `find` commands and nineteen seconds deep, for a store at a
+    /// fixed location the app knew all along.
+    #[tokio::test]
+    async fn a_listed_document_says_where_to_read_it() {
+        let db = shared_db();
+        db.lock()
+            .execute(
+                "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+                 VALUES (1,'B','b','/repo')",
+                [],
+            )
+            .unwrap();
+        let base = serve().await;
+
+        let created: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/api/projects/1/artifacts", base))
+            .json(&serde_json::json!({
+                "title": "Where things live",
+                "kind": "doc",
+                "content": "# Where things live\n\nA note.\n",
+                "tags": ["reference"],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let saved_path = created["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("save must answer with a path, got {created}"))
+            .to_string();
+
+        let listed: serde_json::Value = reqwest::get(format!("{}/api/projects/1/artifacts", base))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mine = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == created["id"])
+            .expect("the document just saved is in the listing");
+
+        // The same path saving reported. Two surfaces disagreeing about where a
+        // document is would be worse than one of them staying quiet.
+        assert_eq!(mine["path"].as_str(), Some(saved_path.as_str()));
+        assert!(
+            std::path::Path::new(&saved_path).is_file(),
+            "and it names a file that exists: {saved_path}"
+        );
     }
 
     #[tokio::test]
