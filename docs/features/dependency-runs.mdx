@@ -107,9 +107,14 @@ A stopped run is announced three ways: a desktop notification, a red entry in th
 
 ### Resolving it
 
-The marker is a button. It opens a panel naming the shared branch, with two ways forward:
+The marker is a button. It opens a panel naming the shared branch, with three ways forward:
 
 <Steps>
+  <Step title="Resolve" icon="wand-magic-sparkles">
+    Creates a task on the board whose job is the merge. It joins the run, so its checkout is cut from the shared branch and the run's merged work is already in front of it; its instructions are to merge the refused branch in and resolve the conflict by combining both sides' intent. It runs the project's conflict-resolution model — Opus at high thinking effort unless **Project Settings → Engine tab** says otherwise.
+
+    Because it is an ordinary task it can raise a blocker when the right resolution is a judgement call rather than a merge, and the tasks that have not run yet depend on it. When the resolution verifies, the run carries on by itself.
+  </Step>
   <Step title="Carry on" icon="play">
     Merges whatever is still missing from the trunk, then runs the rest of the chain from where it stopped. Use it whether you merged the branch by hand or fixed what caused the conflict — a branch already on the trunk is left alone rather than merged twice.
 
@@ -122,11 +127,19 @@ The marker is a button. It opens a panel naming the shared branch, with two ways
 
 A stopped run keeps hold of its tasks, which is how those markers know what to show. Starting a fresh chain over any of them closes the stopped run first, so nothing is claimed forever by a run nobody is going to finish.
 
+### What a resolution has to prove
+
+A resolution only reaches the shared branch if the refused branch's commits are ancestors of it. A resolve task that copied the content across, cherry-picked it, or wrote a convincing look-alike fails that check: its branch is kept for you to read, and the shared branch is not touched at all. That matters more than rejecting the work — landing a look-alike would leave you merging the real branch into a branch that now conflicts with it, which is worse than the stop you started with.
+
+Ancestry proves the branch was merged. It does not prove the resolution kept both sides' intent: a genuine merge commit that quietly discarded one side passes it. That is why the resolve task obeys the [approval gate](/features/approval-gates) like any other task — with it on, you read the resolution before it reaches the shared branch, and nothing resumes until you approve. With it off the resolution lands unreviewed, and the ancestry check is the only thing between the agent and the shared branch.
+
+One resolve attempt per run. If the resolution is rejected, or a second branch is refused afterwards, the panel says so and the ways forward are the other two. The resolve task and the dependency edges pointing at it stay on the board once the run is over, as the record of how the conflict was handled.
+
 ### While a run is stopped, its tasks stay put
 
-A stopped run holds every one of its tasks back, and nothing automatic can start them: not [Auto-Queue](/features/queue), not a sibling finishing, not an agent through the [MCP tools](/api/claude-manager). The trunk is missing work those tasks were told they depend on, and a task's own row gives no sign of it — the prerequisite that failed to merge still reports done.
+A stopped run holds every one of its tasks back, and nothing automatic can start them: not [Auto-Queue](/features/queue), not a sibling finishing, not an agent through the [MCP tools](/api/claude-manager). The one exception is the run's own resolve task, which runs on the stopped trunk because putting the missing work there is its job. The trunk is missing work those tasks were told they depend on, and a task's own row gives no sign of it — the prerequisite that failed to merge still reports done.
 
-Starting one by hand opens the resolution panel instead, with a third option below the other two:
+Starting one by hand opens the resolution panel instead, with a fourth option below the other three:
 
 <Steps>
   <Step title="Start anyway" icon="triangle-exclamation">
@@ -136,7 +149,7 @@ Starting one by hand opens the resolution panel instead, with a third option bel
   </Step>
 </Steps>
 
-Resolving the run — either way — releases the hold. Carrying on returns the run to active; abandoning closes it. An unfinished prerequisite is a separate refusal that no confirmation clears, because that work does not exist yet rather than merely sitting on a branch.
+Resolving the run releases the hold. A verified resolution and Carry on both return the run to active; abandoning closes it, and closes an unfinished resolve task with it. An unfinished prerequisite is a separate refusal that no confirmation clears, because that work does not exist yet rather than merely sitting on a branch.
 
 ## What a chain does not touch
 
