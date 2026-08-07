@@ -319,6 +319,10 @@ pub fn create_tables(conn: &Connection) {
             -- install. set_status validates the name in Rust, where adding a state
             -- costs nothing. See migrate_task_groups_status_check.
             status TEXT DEFAULT 'active',
+            -- The task created to resolve a merge conflict that stopped this run.
+            -- Outlives the run: membership is released when a group finishes, but
+            -- this column is the row's record of how the conflict was handled.
+            resolve_task_id INTEGER,
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -775,6 +779,13 @@ pub fn run_migrations(conn: &Connection) {
             "projects",
             "auto_merge",
             "ALTER TABLE projects ADD COLUMN auto_merge INTEGER DEFAULT 0",
+        ),
+        // The task created to resolve the merge conflict that stopped a run. Kept
+        // after the run ends: the group row is the record of how it was handled.
+        (
+            "task_groups",
+            "resolve_task_id",
+            "ALTER TABLE task_groups ADD COLUMN resolve_task_id INTEGER",
         ),
     ];
 

@@ -33,6 +33,8 @@ pub struct TaskGroup {
     pub base_branch: String,
     pub target_task_id: i64,
     pub status: String,
+    /// The task created to resolve the conflict that stopped this run, if one was.
+    pub resolve_task_id: Option<i64>,
     pub created_at: Option<String>,
 }
 
@@ -46,6 +48,9 @@ fn row_to_group(row: &Row) -> rusqlite::Result<TaskGroup> {
         status: row
             .get::<_, Option<String>>("status")?
             .unwrap_or_else(|| STATUS_ACTIVE.into()),
+        // `.ok().flatten()` like created_at: a row read before the migration ran
+        // has no such column, and a group without a resolve task is the norm.
+        resolve_task_id: row.get("resolve_task_id").ok().flatten(),
         created_at: row.get("created_at").ok().flatten(),
     })
 }
@@ -263,6 +268,20 @@ pub fn members(db: &DbPool, group_id: i64) -> Vec<i64> {
     out
 }
 
+/// Record the task created to resolve this run's conflict.
+///
+/// Written once, never cleared: the run's members are released when it finishes, so
+/// this column is all that is left to say a conflict was resolved and by what.
+pub fn set_resolve_task(db: &DbPool, group_id: i64, task_id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE task_groups SET resolve_task_id=?2, updated_at=datetime('now','localtime')
+         WHERE id=?1",
+        params![group_id, task_id],
+    )?;
+    Ok(())
+}
+
 pub fn set_status(db: &DbPool, group_id: i64, status: &str) -> Result<(), AppError> {
     if !matches!(
         status,
@@ -322,6 +341,24 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn the_resolve_task_is_recorded_and_survives_the_runs_end() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let r = seed_task(&db, "resolve");
+        let id = create(&db, 1, "trunk/s", "main", a, &[a]).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, None);
+
+        set_resolve_task(&db, id, r).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, Some(r));
+
+        // finish() deletes membership but keeps the group row — and this column is
+        // the row's record of how the conflict was handled. Losing it on finish
+        // would erase the audit trail the feature promises.
+        finish(&db, id, STATUS_COMPLETED).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, Some(r));
     }
 
     #[test]
