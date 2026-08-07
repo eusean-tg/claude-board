@@ -1017,9 +1017,10 @@ pub fn carry_run_on(
     db: &DbPool,
     app: Option<&AppHandle>,
     group: &crate::db::task_groups::TaskGroup,
-    working_dir: &str,
+    project: &projects::Project,
     anchor_task_id: i64,
 ) -> RunResumeOutcome {
+    let working_dir = project.working_dir.as_str();
     let outcome = remerge_stopped_members(db, group, working_dir);
     let RunResumeOutcome::Ready { merged } = outcome else {
         return outcome;
@@ -1030,6 +1031,9 @@ pub fn carry_run_on(
     {
         log::error!("could not resume group {}: {}", group.id, e);
     }
+    // Before the remaining members start, so a branch this sweep considers cannot be
+    // one a starting task has just cut.
+    delete_landed_member_branches(db, group, project);
     if let Some(app) = app {
         crate::services::queue::start_group_members(db, app, group.project_id, group.id);
     }
@@ -1052,6 +1056,76 @@ pub fn carry_run_on(
     RunResumeOutcome::Ready { merged }
 }
 
+/// Delete the member branches whose commits the trunk now holds.
+///
+/// A refused merge keeps its branch, because at that moment the branch is the only
+/// copy of the work. Once a resolution has put those commits on the trunk the branch
+/// is litter — but nothing revisits it, so it outlived the run it belonged to.
+///
+/// The deletion rule is the one `cleanup_task_branch_in` uses, and for the reason
+/// that rule exists: a branch goes only when its commits are reachable from where
+/// they need to be. `-D` rather than `-d`, because `-d` measures merged-ness against
+/// whatever HEAD happens to be rather than against the trunk.
+///
+/// Skipped wholesale when the project manages no branches, or when Auto PR is on and
+/// an open pull request may still need them.
+fn delete_landed_member_branches(
+    db: &DbPool,
+    group: &crate::db::task_groups::TaskGroup,
+    project: &projects::Project,
+) -> Vec<String> {
+    if project.auto_branch.unwrap_or(1) == 0 || project.auto_pr.unwrap_or(0) == 1 {
+        return Vec::new();
+    }
+    let working_dir = project.working_dir.as_str();
+    let mut deleted = Vec::new();
+    for id in crate::db::task_groups::members(db, group.id) {
+        let Some(task) = tasks::get_by_id(db, id) else {
+            continue;
+        };
+        // `done` only, for the same reason the debt query filters on it: an in-flight
+        // member's branch is checked out in a live worktree.
+        if task.status.as_deref() != Some("done") {
+            continue;
+        }
+        let Some(branch) = task.branch_name.as_deref().filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if branch == group.trunk_branch || !branch_ref_exists(branch, working_dir) {
+            continue;
+        }
+        if !branch_is_merged_into(branch, &group.trunk_branch, working_dir) {
+            continue;
+        }
+        let mut cmd = crate::child_env::command("git");
+        cmd.args(["branch", "-D", branch])
+            .current_dir(working_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
+            log::info!(
+                "Deleted {} — its commits are on {}",
+                branch,
+                group.trunk_branch
+            );
+            deleted.push(branch.to_string());
+            if project.auto_push.unwrap_or(0) == 1 {
+                let mut push = crate::child_env::command("git");
+                push.args(["push", "origin", "--delete", branch])
+                    .current_dir(working_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(target_os = "windows")]
+                push.creation_flags(CREATE_NO_WINDOW);
+                push.output().ok();
+            }
+        }
+    }
+    deleted
+}
+
 /// Carry the run on once its resolution has landed and verified.
 ///
 /// Called for every task that finishes inside a stopped run, and does nothing unless
@@ -1071,9 +1145,10 @@ fn resume_after_resolve(
     db: &DbPool,
     app: Option<&AppHandle>,
     task_id: i64,
-    working_dir: &str,
+    project: &projects::Project,
     outcome: &BranchCleanup,
 ) {
+    let working_dir = project.working_dir.as_str();
     let Some(group) = crate::db::task_groups::stopped_for_task(db, task_id) else {
         return;
     };
@@ -1136,7 +1211,7 @@ fn resume_after_resolve(
         return;
     }
 
-    carry_run_on(db, app, &group, working_dir, task_id);
+    carry_run_on(db, app, &group, project, task_id);
 }
 
 /// Stop a run whose member could not put its work on the trunk.
@@ -1477,11 +1552,10 @@ pub fn report_task_branch_outcome(
     }
     // Never returns early: whatever the resolution did, the outcome's own log line
     // still belongs in the task's log.
-    if let Some(dir) = tasks::get_by_id(db, task_id)
-        .and_then(|t| projects::get_by_id(db, t.project_id))
-        .map(|p| p.working_dir)
+    if let Some(project) =
+        tasks::get_by_id(db, task_id).and_then(|t| projects::get_by_id(db, t.project_id))
     {
-        resume_after_resolve(db, Some(app), task_id, &dir, &outcome);
+        resume_after_resolve(db, Some(app), task_id, &project, &outcome);
     }
     report_branch_cleanup(outcome, task_id, db, app);
 }
@@ -4234,6 +4308,96 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A project with branch management on and Auto PR off — the shipped default,
+    /// and the state in which a landed branch may be deleted.
+    fn project_with_pr(working_dir: &str, auto_pr: i64) -> projects::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "p", "slug": "p", "working_dir": working_dir,
+            "auto_branch": 1, "auto_pr": auto_pr, "auto_push": 0, "auto_merge": 0,
+            "pr_base_branch": "main",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_verified_resolution_takes_the_refused_branch_with_it() {
+        // The refused branch was kept because it held the only copy of the work.
+        // Once a resolution puts those commits on the trunk that reason is gone, and
+        // nothing else revisits it — so it outlived the run that owned it.
+        let root = repo("sweep-landed");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/sw", "main"], &root));
+        commit_on(&root, "feature/x", "x.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/sw"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/x"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = run_awaiting_resolution(
+            &db,
+            "trunk/feature/sw",
+            (120, "feature/x"),
+            (121, "resolve/sw"),
+        );
+
+        let deleted = delete_landed_member_branches(&db, &group, &project_with_pr(&dir, 0));
+
+        assert_eq!(deleted, vec!["feature/x".to_string()]);
+        assert!(!branch_exists(&root, "feature/x"));
+        // And the work is not lost — that is the whole precondition for deleting it.
+        assert!(file_on(&root, "trunk/feature/sw", "x.txt").is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_branch_the_trunk_does_not_have_is_never_deleted() {
+        // The rule that matters. Deleting a branch whose commits live nowhere else
+        // strands them: the worktree is already gone, so the next gc collects them.
+        // This is the shape of the bug that once destroyed a whole feature.
+        let root = repo("sweep-unmerged");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/un", "main"], &root));
+        commit_on(&root, "feature/x", "x.txt");
+        let db = test_db();
+        let group = run_awaiting_resolution(
+            &db,
+            "trunk/feature/un",
+            (122, "feature/x"),
+            (123, "resolve/un"),
+        );
+
+        let deleted = delete_landed_member_branches(&db, &group, &project_with_pr(&dir, 0));
+
+        assert!(deleted.is_empty(), "{deleted:?}");
+        assert!(branch_exists(&root, "feature/x"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_open_pull_request_keeps_its_branch() {
+        // With Auto PR on, cleanup_task_branch_in declines to delete anything for
+        // exactly this reason: a branch with an open PR is still in use.
+        let root = repo("sweep-pr");
+        let dir = root.to_string_lossy().to_string();
+        assert!(git(&["branch", "trunk/feature/pr", "main"], &root));
+        commit_on(&root, "feature/x", "x.txt");
+        assert!(git(&["checkout", "--quiet", "trunk/feature/pr"], &root));
+        assert!(git(&["merge", "--no-ff", "--no-edit", "feature/x"], &root));
+        assert!(git(&["checkout", "--quiet", "main"], &root));
+        let db = test_db();
+        let group = run_awaiting_resolution(
+            &db,
+            "trunk/feature/pr",
+            (124, "feature/x"),
+            (125, "resolve/pr"),
+        );
+
+        let deleted = delete_landed_member_branches(&db, &group, &project_with_pr(&dir, 1));
+
+        assert!(deleted.is_empty(), "{deleted:?}");
+        assert!(branch_exists(&root, "feature/x"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_verified_resolution_resumes_the_run() {
         let root = repo("resume-verified");
@@ -4257,7 +4421,7 @@ mod tests {
             &db,
             None,
             105,
-            &dir,
+            &project(&dir),
             &BranchCleanup::Merged {
                 branch: "resolve/v".into(),
                 base: "trunk/feature/v".into(),
@@ -4290,7 +4454,7 @@ mod tests {
             &db,
             None,
             107,
-            &dir,
+            &project(&dir),
             &BranchCleanup::KeptResolutionRejected {
                 branch: "resolve/q".into(),
                 base: "trunk/feature/q".into(),
@@ -4328,7 +4492,7 @@ mod tests {
             &db,
             None,
             109,
-            &dir,
+            &project(&dir),
             &BranchCleanup::KeptMergeRefused {
                 branch: "resolve/rf".into(),
                 base: "trunk/feature/rf".into(),
@@ -4373,7 +4537,7 @@ mod tests {
             &db,
             None,
             111,
-            &dir,
+            &project(&dir),
             &BranchCleanup::Merged {
                 branch: "resolve/dr".into(),
                 base: "trunk/feature/dr".into(),
@@ -4422,7 +4586,7 @@ mod tests {
             &db,
             None,
             115,
-            &dir,
+            &project(&dir),
             &BranchCleanup::Merged {
                 branch: "feature/other".into(),
                 base: "trunk/feature/nm".into(),

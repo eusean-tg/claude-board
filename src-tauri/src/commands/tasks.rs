@@ -340,7 +340,7 @@ pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Va
     let project = pq::get_by_id(&db, group.project_id).ok_or("Project not found")?;
 
     let members = db::task_groups::members(&db, group.id);
-    match runner::carry_run_on(&db, Some(&app), &group, &project.working_dir, task_id) {
+    match runner::carry_run_on(&db, Some(&app), &group, &project, task_id) {
         runner::RunResumeOutcome::StillRefused { branch, refusal } => Err(format!(
             "{} still cannot be merged into {}: {}",
             branch,
