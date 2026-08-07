@@ -158,8 +158,12 @@ export default {
   'runStopped.abandon': 'Abandon run',
   'runStopped.abandonConfirm': 'Abandon — release the tasks',
   'runStopped.cancel': 'Close',
+  'runStopped.startAnywayWarning':
+    'You can start this task on the shared branch as it is. The branch is missing work this task was told it depends on, so the agent may build on something that is not there. The run stays stopped either way.',
+  'runStopped.startAnyway': 'Start anyway',
   'toast.runResumed': 'Run resumed — {count} task(s) started',
   'toast.runAbandoned': 'Run abandoned. {trunk} still holds its work.',
+  'toast.runOverridden': 'Started {title} on an incomplete shared branch',
   'toast.prerequisitesStarted': 'Started {count} tasks',
 
   // ─── Discussion ───

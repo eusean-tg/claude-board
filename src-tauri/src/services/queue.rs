@@ -2,6 +2,7 @@ use crate::claude::runner;
 use crate::claude::state_machine::{EngineConfig, TaskStatus};
 use crate::config;
 use crate::db::{self, activity, dependencies, projects, tasks, DbPool};
+use crate::services::orchestration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -136,6 +137,75 @@ pub fn start_group_members(db: &DbPool, app: &AppHandle, project_id: i64, group_
     start_ready(db, app, project_id, Some(group_id));
 }
 
+/// Give the most-downstream waiting task a group and a trunk, and start its leaves.
+///
+/// Returns true when a chain was started, so the caller can stop there for this tick.
+///
+/// At most one per call, on purpose. Forming a group claims every task in the chain, so
+/// two candidates sharing prerequisites cannot both have them; the first takes them and
+/// the second is skipped until that run finishes. Doing one at a time makes that the
+/// normal case rather than a collision to report.
+fn start_a_chain(db: &DbPool, app: &AppHandle, project_id: i64, mcp_port: u16) -> bool {
+    for target in dependencies::get_chain_targets(db, project_id) {
+        // Already running as a chain, or held by a run that stopped and is waiting for a
+        // person. Either way there is nothing for the queue to start.
+        if crate::db::task_groups::run_for_task(db, target.id).is_some() {
+            continue;
+        }
+        if dependencies::are_all_parents_met(db, target.id) {
+            // Ready on its own — no prerequisites to run first, so it is ordinary queue
+            // work and gets no trunk.
+            continue;
+        }
+        // StopPolicy::Refuse: abandoning a stopped run discards a decision that is the
+        // user's to make, and its trunk holds the work that did merge.
+        match orchestration::start_chain(
+            db,
+            app,
+            target.id,
+            mcp_port,
+            orchestration::StopPolicy::Refuse,
+        ) {
+            Ok(orchestration::ChainStart::Grouped {
+                group_id,
+                queued,
+                trunk,
+            }) => {
+                log::info!(
+                    "auto-queue started run {} on {} over {} task(s), for {}",
+                    group_id,
+                    trunk,
+                    queued.len(),
+                    target.title
+                );
+                activity::add(
+                    db,
+                    project_id,
+                    Some(target.id),
+                    "run_started",
+                    &format!("Dependency run started on {} for {}", trunk, target.title),
+                    None,
+                );
+                return true;
+            }
+            // Its prerequisites are spoken for by another run, or by one that stopped.
+            Ok(orchestration::ChainStart::Claimed(_)) => continue,
+            // Reachable only if the target's own prerequisites became met between the
+            // query and here, which the next tick handles as ordinary ready work.
+            Ok(orchestration::ChainStart::Single { .. }) => return true,
+            Err(e) => {
+                log::error!(
+                    "auto-queue could not start a run for task {}: {}",
+                    target.id,
+                    e
+                );
+                continue;
+            }
+        }
+    }
+    false
+}
+
 /// Start as many ready tasks as the concurrency limit allows.
 ///
 /// With `only_group`, considers just that group's members.
@@ -147,6 +217,22 @@ fn start_ready(db: &DbPool, app: &AppHandle, project_id: i64, only_group: Option
     // The circuit breaker is a safety mechanism rather than a preference, so it
     // applies to an explicitly requested group too.
     if project.circuit_breaker_active.unwrap_or(0) == 1 {
+        return;
+    }
+
+    let mcp_port = config::load_from_handle(app).port;
+
+    // Form chains before starting anything loose, and only when considering the whole
+    // project — the scoped call below is a group carrying itself forward, and looking
+    // for new chains there would recurse.
+    //
+    // Auto-Queue asks the same question a person does: not "what has nothing blocking
+    // it" (the leaves, which it used to start bare off the base branch) but "what did
+    // someone want finished". That task gets a group and a trunk exactly as if its
+    // Start button had been pressed, and its leaves start immediately as members.
+    if only_group.is_none() && start_a_chain(db, app, project_id, mcp_port) {
+        // The chain filled the slots it was entitled to. Whatever else is ready keeps
+        // until the next tick, rather than being counted against a stale slot figure.
         return;
     }
 
@@ -179,7 +265,6 @@ fn start_ready(db: &DbPool, app: &AppHandle, project_id: i64, only_group: Option
     };
 
     let mut started = 0;
-    let mcp_port = config::load_from_handle(app).port;
 
     for task in &ready {
         if started >= slots {

@@ -387,6 +387,9 @@ export const api = {
         startTaskWithPrerequisites: (id) => tauriCall('start_task_with_prerequisites', { id, mcpPort: MCP_PORT }),
         resumeStoppedRun: (id) => tauriCall('resume_stopped_run', { taskId: id }),
         abandonRun: (id) => tauriCall('abandon_run', { taskId: id }),
+        // Its own command rather than a flag on change_task_status, which the MCP
+        // bridge can reach: only a person who read the warning may override the run.
+        startDespiteStoppedRun: (id) => tauriCall('start_task_despite_stopped_run', { id, mcpPort: MCP_PORT }),
         // ─── Blockers ───
         getBlocker: (taskId) => tauriCall('get_blocker', { taskId }),
         taskBlockers: (taskId) => tauriCall('task_blockers', { taskId }),

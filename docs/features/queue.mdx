@@ -83,3 +83,13 @@ Beyond the basic priority ordering above, the queue also considers **critical pa
 The queue supports an automatic pause mechanism when too many tasks fail consecutively. See [Circuit Breaker](/features/circuit-breaker) for configuration and details.
 
 <Warning>Dependencies override queue position. Even if a task has position #1, it won't start until all parent dependencies are met.</Warning>
+
+The queue also passes over any task belonging to a [dependency run that stopped](/features/dependency-runs), however ready it looks. Its parents report done; their work is not on the shared branch. Resolving the run releases them.
+
+### Tasks with dependencies run as a chain
+
+Faced with a task that has unfinished prerequisites, the queue does what pressing its Start button does: it creates a [dependency-ordered run](/features/dependency-runs) over everything that has to happen first, on a shared trunk branch, and starts the leaves on that trunk.
+
+It picks the task furthest down the graph — the one with nothing else waiting on it — rather than the leaves, because that is the task someone wanted finished. The leaves still start immediately; they start as members of the run.
+
+This is what makes a dependent task able to see its prerequisites' work. Started individually, each task branches from the base branch, and with [Auto Merge](/features/git-automation) off its prerequisites' commits are on branches that were never merged into it.

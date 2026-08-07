@@ -114,9 +114,23 @@ Content-Type: application/json
 { "status": "in_progress" }
 ```
 
-Valid statuses: `backlog`, `in_progress`, `testing`, `done`, `failed`
+Valid statuses: `backlog`, `in_progress`, `testing`, `done`, `failed`, `awaiting_approval`, `blocked`
 
 Moving to `in_progress` spawns a Claude agent. Moving to `done` stops any running agent.
+
+This is the same code path the board's own buttons use, so it refuses the same moves, and a refusal names the reason in the body:
+
+```json
+{ "error": "Blocked by 2 unfinished task(s): discovery service, tauri commands" }
+```
+
+| Status | Meaning |
+|---|---|
+| `400` | The move was refused — an illegal transition, an unmet [dependency](/features/dependency-runs), or a [dependency run that stopped](/features/dependency-runs) |
+| `404` | No such task |
+| `503` | The app has not finished starting; nothing was changed and the request can be retried |
+
+A refusal changes nothing, so there is no partial state to undo. None of them clear on their own — read the message rather than retrying.
 
 ## Get Logs
 

@@ -197,16 +197,43 @@ struct StatusBody {
     status: String,
 }
 
+/// The same status change the UI performs, through the same function.
+///
+/// This route used to be three lines — write the status, sync the roadmap, return the
+/// task — which skipped the state machine, the dependency gate, the timers, the blocker
+/// it should have closed, and the runner. An agent moving a task to In Progress got a
+/// success it could not act on: no agent started, and the queue never picked the task
+/// up again because it only ever looks at Backlog.
+///
+/// Also the frontend's own path outside Tauri: `api.updateStatus` falls back to HTTP
+/// whenever `window.__TAURI_INTERNALS__` is absent, which is every browser dev session.
 async fn change_status(Path(id): Path<i64>, Json(body): Json<StatusBody>) -> impl IntoResponse {
-    let db = db::get_db();
-    tasks::update_status(&db, id, &body.status);
-    // Keep GSD roadmap (DB + ROADMAP.md) in sync when task status is changed
-    // via the MCP HTTP bridge. No AppHandle here → UI refresh is skipped but
-    // the file/DB state stays consistent.
-    crate::services::gsd::apply_task_status_cascade(&db, None, id);
-    match tasks::get_by_id(&db, id) {
-        Some(t) => Json(to_json(&t)).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+    let app = crate::app_handle();
+    let mcp_port = app
+        .as_ref()
+        .map(|a| crate::config::load_from_handle(a).port)
+        .unwrap_or_default();
+    // StartOverride::None: an agent cannot be shown what a stopped run's trunk is
+    // missing, so it never gets to decide to start anyway.
+    match crate::commands::tasks::change_status_inner(
+        app.as_ref(),
+        id,
+        &body.status,
+        mcp_port,
+        crate::commands::tasks::StartOverride::None,
+    ) {
+        Ok(task) => Json(to_json(&task)).into_response(),
+        // The gates speak to the caller: an agent reads this text and acts on it, so a
+        // refusal travels as a body rather than a bare status code.
+        Err(e) => {
+            let code = match e.as_str() {
+                crate::commands::tasks::ERR_NO_TASK => StatusCode::NOT_FOUND,
+                // The request was fine and will work later, which is not what 400 says.
+                crate::commands::tasks::ERR_NO_APP => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            (code, Json(serde_json::json!({"error": e}))).into_response()
+        }
     }
 }
 
@@ -833,25 +860,158 @@ mod blocker_tests {
     }
 }
 
-/// One test, over real HTTP, through the real router.
+/// The tests that go over real HTTP, through the real router.
 ///
-/// Kept apart from `blocker_tests` because it initialises the process-global
-/// database pool that the handlers read. Nothing else in the suite touches that
-/// global, and it can only be set once per process, so exactly one test may do it.
+/// Kept apart from `blocker_tests` because they initialise the process-global database
+/// pool the handlers read, and `OnceCell` takes the first setter only. So every test
+/// here shares one database: [`shared_db`] hands back a pool onto the same file, and
+/// tests keep to their own task ids rather than their own schema. Nothing removes the
+/// directory — a second test would pull the file out from under a first still running.
 #[cfg(test)]
-mod blocker_http_tests {
+mod http_route_tests {
     use super::*;
     use crate::db::blockers::{self, BlockerResponse};
     use std::time::Duration;
 
+    /// The process-global pool, initialised exactly once.
+    ///
+    /// `get_or_init` blocks every other caller until the first finishes, which is the
+    /// point: two `init_db` calls racing on `PRAGMA journal_mode = WAL` fail with
+    /// "database is locked", and these tests run in parallel.
+    fn shared_db() -> DbPool {
+        static POOL: std::sync::OnceLock<DbPool> = std::sync::OnceLock::new();
+        POOL.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("cb-http-routes-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            match crate::db::init_db(&dir.to_string_lossy()) {
+                Ok(pool) => pool,
+                Err(e) => panic!("init_db: {e}"),
+            }
+        })
+        .clone()
+    }
+
+    /// Serve the real router on an ephemeral port and return its base URL.
+    async fn serve() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, router()).await.ok();
+        });
+        base
+    }
+
+    fn status_of(db: &DbPool, id: i64) -> String {
+        db.lock()
+            .query_row(
+                "SELECT status FROM tasks WHERE id=?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The bridge an agent moves a task through, and the gates it must not get past.
+    ///
+    /// This route used to write the status and return 200 whatever the request said.
+    /// Every assertion here failed then: an unmet prerequisite was ignored, an illegal
+    /// transition was applied, and a task landed In Progress with no agent behind it and
+    /// no way back — the queue only ever reconsiders Backlog.
+    #[tokio::test]
+    async fn the_status_route_refuses_what_the_board_would_refuse() {
+        let db = shared_db();
+        let (parent, child, lone) = (801, 802, 803);
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+                 VALUES (1,'B','b','/repo')",
+                [],
+            )
+            .unwrap();
+            for (id, title) in [(parent, "discovery service"), (child, "wire the tab")] {
+                conn.execute(
+                    "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+                     VALUES (?1,1,?2,'backlog')",
+                    rusqlite::params![id, title],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+                 VALUES (?1,1,'on its own','backlog')",
+                rusqlite::params![lone],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO task_dependencies (task_id,depends_on_id,condition_type)
+                 VALUES (?1,?2,'always')",
+                rusqlite::params![child, parent],
+            )
+            .unwrap();
+        }
+
+        let base = serve().await;
+        let client = reqwest::Client::new();
+        let patch = |id: i64, status: &str| {
+            let (client, url, status) = (
+                client.clone(),
+                format!("{}/api/tasks/{}/status", base, id),
+                status.to_string(),
+            );
+            async move {
+                client
+                    .patch(&url)
+                    .json(&serde_json::json!({"status": status}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // ── An unmet prerequisite is refused, and named ──
+        let res = patch(child, "in_progress").await;
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json().await.unwrap();
+        let err = body["error"].as_str().unwrap_or_default().to_string();
+        assert!(
+            err.contains("discovery service"),
+            "the refusal must name what has to run first, got {err:?}"
+        );
+        assert_eq!(status_of(&db, child), "backlog", "a refusal must not write");
+
+        // ── An illegal transition is refused ──
+        let res = patch(child, "testing").await;
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(status_of(&db, child), "backlog");
+
+        // ── An unknown status is refused rather than stored verbatim ──
+        // tasks.status carries no CHECK, so this route was free to write anything.
+        let res = patch(child, "nonsense").await;
+        assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(status_of(&db, child), "backlog");
+
+        // ── A task nobody has is a 404, not a refused start ──
+        assert_eq!(
+            patch(999_999, "in_progress").await.status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+
+        // ── A start that passes every gate still needs the app to run the agent ──
+        // There is no AppHandle in a test, which is the case this asserts: the status is
+        // left alone rather than written for an agent that was never going to start.
+        let res = patch(lone, "in_progress").await;
+        assert_eq!(res.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            status_of(&db, lone),
+            "backlog",
+            "the status must not move without the side effects that give it meaning"
+        );
+    }
+
     #[tokio::test]
     async fn an_agent_raises_a_question_over_http_and_gets_the_answer_back() {
-        let dir = std::env::temp_dir().join(format!("cb-blocker-http-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = match crate::db::init_db(&dir.to_string_lossy()) {
-            Ok(pool) => pool,
-            Err(e) => panic!("init_db: {e}"),
-        };
+        let db = shared_db();
 
         let task_id = 701;
         {
@@ -870,12 +1030,7 @@ mod blocker_http_tests {
             .unwrap();
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, router()).await.ok();
-        });
-
+        let base = serve().await;
         let client = reqwest::Client::new();
         let url = format!("{}/api/tasks/{}/blockers", base, task_id);
 
@@ -988,7 +1143,5 @@ mod blocker_http_tests {
             .await
             .unwrap();
         assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -245,6 +245,12 @@ pub fn unmet_ancestor_waves(db: &DbPool, task_id: i64) -> Vec<Vec<Task>> {
 /// Get all backlog tasks in a project that have all dependencies met (ready to run).
 /// Supports conditional dependencies: always/on_success require parent done/testing,
 /// on_failure requires parent to have exhausted retries.
+///
+/// A stopped run's members are never ready. A parent counts as met on its *status*,
+/// and a member whose merge into the trunk was refused still reports `done` — so
+/// without this the queue starts the very tasks the stop exists to hold back, on a
+/// trunk that is missing the work they were told they depend on. Resolving the run
+/// returns it to `active`, which is what makes its members eligible again.
 pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
     let conn = db.lock();
     let sql = format!(
@@ -253,6 +259,11 @@ pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
          WHERE t.project_id = ?1 AND t.status = 'backlog'
          AND COALESCE(t.retry_count, 0) <= CASE WHEN COALESCE(p.max_retries, 0) > 0 THEN p.max_retries ELSE 2 END
          AND (t.retry_after IS NULL OR t.retry_after <= datetime('now','localtime'))
+         AND NOT EXISTS (
+             SELECT 1 FROM task_group_members m
+             JOIN task_groups g ON g.id = m.group_id
+             WHERE m.task_id = t.id AND g.status = 'stopped'
+         )
          AND NOT EXISTS (
              SELECT 1 FROM task_dependencies td
              JOIN tasks parent ON parent.id = td.depends_on_id
@@ -271,6 +282,58 @@ pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
     let result = match stmt.query_map(params![project_id], super::tasks::row_to_task) {
         Ok(rows) => rows.flatten().collect(),
         Err(_) => vec![],
+    };
+    result
+}
+
+/// Backlog tasks that need a chain run rather than a plain start, furthest down the
+/// graph first.
+///
+/// The task a person would have clicked. Auto-Queue used to ask only "what has nothing
+/// blocking it", which is the *leaves* — so it started them one at a time off the base
+/// branch, with no group and no trunk. Dependency order was respected and dependency
+/// *content* was not: the next task down branched from a base branch its prerequisites
+/// had never merged into, and could not see the work it was told it depended on.
+///
+/// A candidate is a backlog task with at least one parent and no pending task depending
+/// on it. Pending covers `failed` as well as `backlog`, because a failed dependent is
+/// retried and so still sits further down than this task.
+///
+/// Deliberately one candidate at a time, not one group per connected component. A
+/// component that forks at the end has two tasks with nothing after them, and
+/// `finish_group_if_complete` lands a trunk only when the task that just finished is the
+/// group's target — with two ends it watches one and the other finishes later, so the
+/// trunk would never land. Every group cut from a single candidate has that candidate as
+/// its one and only end, which is the same shape the Start button produces.
+pub fn get_chain_targets(db: &DbPool, project_id: i64) -> Vec<Task> {
+    let conn = db.lock();
+    let sql = "SELECT t.* FROM tasks t
+         WHERE t.project_id = ?1 AND t.status = 'backlog' AND t.deleted_at IS NULL
+         AND (t.retry_after IS NULL OR t.retry_after <= datetime('now','localtime'))
+         AND EXISTS (SELECT 1 FROM task_dependencies td WHERE td.task_id = t.id)
+         AND NOT EXISTS (
+             SELECT 1 FROM task_dependencies cd
+             JOIN tasks child ON child.id = cd.task_id
+             WHERE cd.depends_on_id = t.id
+             AND child.deleted_at IS NULL
+             AND child.status IN ('backlog', 'failed')
+         )
+         ORDER BY t.priority DESC, t.queue_position ASC, t.id ASC";
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("get_chain_targets: {}", e);
+            return vec![];
+        }
+    };
+    // Bound rather than returned directly: the rows borrow `stmt`, which borrows `conn`,
+    // and returning the expression drops both while the iterator is still live.
+    let result = match stmt.query_map(params![project_id], super::tasks::row_to_task) {
+        Ok(rows) => rows.flatten().collect(),
+        Err(e) => {
+            log::error!("get_chain_targets: {}", e);
+            vec![]
+        }
     };
     result
 }
@@ -723,5 +786,177 @@ mod tests {
             wave_ids(&unmet_ancestor_waves(&db, c)),
             vec![vec![a], vec![b]]
         );
+    }
+
+    fn ready_ids(db: &DbPool) -> Vec<i64> {
+        get_ready_tasks(db, 1).into_iter().map(|t| t.id).collect()
+    }
+
+    #[test]
+    fn a_task_whose_parent_is_done_is_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+
+        assert_eq!(ready_ids(&db), vec![a]);
+
+        set_status(&db, a, "done");
+
+        assert_eq!(ready_ids(&db), vec![b]);
+    }
+
+    #[test]
+    fn a_stopped_runs_members_are_never_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        // The shape a refused merge leaves behind: the prerequisite reports done, so
+        // b's parents are met, and nothing about b's own row looks wrong.
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+        assert_eq!(ready_ids(&db), vec![b], "ready while the run is active");
+
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+
+        // Starting b here would run it against a trunk missing a's work.
+        assert!(ready_ids(&db).is_empty());
+    }
+
+    #[test]
+    fn resolving_a_stopped_run_makes_its_members_ready_again() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+
+        // Carrying the run on returns it to active before starting anything, which is
+        // the whole reason this filter can be unconditional.
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_ACTIVE)
+            .unwrap();
+
+        assert_eq!(ready_ids(&db), vec![b]);
+    }
+
+    fn target_ids(db: &DbPool) -> Vec<i64> {
+        get_chain_targets(db, 1).into_iter().map(|t| t.id).collect()
+    }
+
+    /// A → C → D, the shape the queue used to start one leaf at a time.
+    fn chain(db: &DbPool) -> (i64, i64, i64) {
+        let a = seed_task(db, "dep a");
+        let c = seed_task(db, "dep c");
+        let d = seed_task(db, "dep d");
+        add_dependency(db, c, a, None).unwrap();
+        add_dependency(db, d, c, None).unwrap();
+        (a, c, d)
+    }
+
+    #[test]
+    fn the_chain_target_is_the_task_at_the_end_not_the_leaf() {
+        let db = test_db();
+        let (a, _c, d) = chain(&db);
+
+        // The leaf is what get_ready_tasks offers, and starting it alone is the bug: it
+        // branches from the base branch, so the next task down cannot see its work.
+        assert_eq!(ready_ids(&db), vec![a]);
+        assert_eq!(target_ids(&db), vec![d]);
+    }
+
+    #[test]
+    fn a_task_with_no_prerequisites_is_not_a_chain_target() {
+        let db = test_db();
+        let lone = seed_task(&db, "on its own");
+
+        // One branch off the base is already correct for it.
+        assert_eq!(ready_ids(&db), vec![lone]);
+        assert!(target_ids(&db).is_empty());
+    }
+
+    #[test]
+    fn a_fork_at_the_end_offers_each_end_separately() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let c = seed_task(&db, "dep c");
+        let d = seed_task(&db, "dep d");
+        let e = seed_task(&db, "dep e");
+        add_dependency(&db, c, a, None).unwrap();
+        add_dependency(&db, d, c, None).unwrap();
+        add_dependency(&db, e, c, None).unwrap();
+
+        // Two ends, offered one at a time rather than as a single group over the whole
+        // component. A group with two ends never lands its trunk: the landing check only
+        // fires for the group's target, and the other end finishes after it.
+        assert_eq!(target_ids(&db), vec![d, e]);
+    }
+
+    #[test]
+    fn a_task_stops_being_a_target_once_something_downstream_is_waiting_on_it() {
+        let db = test_db();
+        let (_a, c, d) = chain(&db);
+        assert_eq!(target_ids(&db), vec![d]);
+
+        // With d done there is nothing after c, so c becomes the end of what is left.
+        set_status(&db, d, "done");
+
+        assert_eq!(target_ids(&db), vec![c]);
+    }
+
+    #[test]
+    fn a_failed_dependent_still_counts_as_waiting() {
+        let db = test_db();
+        let (_a, _c, d) = chain(&db);
+
+        // d is retried, so it is still further down than c and c must not be the target.
+        // d itself is not backlog, so nothing is a target while it waits to run again.
+        set_status(&db, d, "failed");
+
+        assert!(target_ids(&db).is_empty());
+    }
+
+    #[test]
+    fn a_deleted_task_is_neither_a_target_nor_something_to_wait_for() {
+        let db = test_db();
+        let (_a, c, d) = chain(&db);
+        db.lock()
+            .execute(
+                "UPDATE tasks SET deleted_at=datetime('now') WHERE id=?1",
+                params![d],
+            )
+            .unwrap();
+
+        // A deleted task is off the board, so c is now the end of the chain rather than
+        // being held below one nobody can see.
+        assert_eq!(target_ids(&db), vec![c]);
+    }
+
+    #[test]
+    fn a_finished_runs_members_stay_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+
+        // Only 'stopped' holds work back. A run that completed or was abandoned has
+        // released its tasks, and filtering on membership alone would strand them.
+        for status in [
+            crate::db::task_groups::STATUS_COMPLETED,
+            crate::db::task_groups::STATUS_FAILED,
+        ] {
+            crate::db::task_groups::set_status(&db, gid, status).unwrap();
+            assert_eq!(
+                ready_ids(&db),
+                vec![b],
+                "not ready while the run was {status}"
+            );
+        }
     }
 }

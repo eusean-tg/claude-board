@@ -42,6 +42,16 @@ A chain runs to the end whether or not [Auto-Queue](/features/queue) is on. Auto
 
 A task whose prerequisites are already met needs no chain and starts on its own, with no group and no shared branch.
 
+## Chains Auto-Queue starts
+
+[Auto-Queue](/features/queue) forms chains the same way, without the confirmation — there is no one to ask.
+
+It picks the task a person would have clicked: the one furthest down the graph, the one with nothing else waiting on it. That task gets a group and a trunk, and its leaves start immediately as members of it. Priority and queue position break ties, exactly as they do for ordinary queued work.
+
+One chain at a time. Forming a group claims every task in it, so two tasks at the end of a graph that share prerequisites cannot both have them — the first takes them, and the second waits until that run finishes rather than competing for them.
+
+A run that has stopped is left alone. Its tasks stay claimed and the queue passes over them, because giving up on a stopped run is a decision for you to make and its trunk holds the work that did merge.
+
 ## The shared branch
 
 The reason a chain works at all is where its tasks branch from.
@@ -112,9 +122,21 @@ The marker is a button. It opens a panel naming the shared branch, with two ways
 
 A stopped run keeps hold of its tasks, which is how those markers know what to show. Starting a fresh chain over any of them closes the stopped run first, so nothing is claimed forever by a run nobody is going to finish.
 
-<Note>
-Stopping the chain stops the chain. If [Auto-Queue](/features/queue) is on, a task whose prerequisites are marked done can still be picked up as ordinary ready work, because dependency readiness is a question about task status rather than about what reached a branch.
-</Note>
+### While a run is stopped, its tasks stay put
+
+A stopped run holds every one of its tasks back, and nothing automatic can start them: not [Auto-Queue](/features/queue), not a sibling finishing, not an agent through the [MCP tools](/api/claude-manager). The trunk is missing work those tasks were told they depend on, and a task's own row gives no sign of it — the prerequisite that failed to merge still reports done.
+
+Starting one by hand opens the resolution panel instead, with a third option below the other two:
+
+<Steps>
+  <Step title="Start anyway" icon="triangle-exclamation">
+    Runs the task on the trunk as it stands. The agent may build on work that is not there, so the panel says so before offering it, and the task's log records that it started over a stopped run.
+
+    The run stays stopped. The branch that could not merge still has to be dealt with, and carrying on afterwards has to merge it into a trunk that now holds this task's work too.
+  </Step>
+</Steps>
+
+Resolving the run — either way — releases the hold. Carrying on returns the run to active; abandoning closes it. An unfinished prerequisite is a separate refusal that no confirmation clears, because that work does not exist yet rather than merely sitting on a branch.
 
 ## What a chain does not touch
 
