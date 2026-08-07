@@ -96,14 +96,31 @@ pub fn get_child_ids(db: &DbPool, task_id: i64) -> Vec<i64> {
 /// - `on_any`: either
 fn edge_is_met_sql(parent_alias: &str) -> String {
     format!(
-        "CASE COALESCE(td.condition_type, 'always')
+        "(CASE COALESCE(td.condition_type, 'always')
              WHEN 'on_failure' THEN
                  {a}.status = 'failed'
              WHEN 'on_any' THEN
                  {a}.status IN ('done', 'testing', 'failed')
              ELSE
                  {a}.status IN ('done', 'testing')
-         END",
+         END
+         AND NOT (
+             -- Inside a run, `testing` is not enough. A member's branch merges into
+             -- the trunk on the transition to `done` and not before, so a parent
+             -- parked for review has put nothing there — while the child's worktree
+             -- is cut from the trunk. Counting it as met let a dependent run blind:
+             -- observed in the app with the approval gate on, where the dependent
+             -- reported every one of its inputs missing.
+             --
+             -- Scoped to shared membership rather than applied everywhere, because
+             -- outside a run there is no trunk and no promise about a checkout.
+             {a}.status = 'testing'
+             AND EXISTS (
+                 SELECT 1 FROM task_group_members cm
+                 JOIN task_group_members pm ON pm.group_id = cm.group_id
+                 WHERE cm.task_id = td.task_id AND pm.task_id = td.depends_on_id
+             )
+         ))",
         a = parent_alias
     )
 }
@@ -769,6 +786,65 @@ mod tests {
             assert!(unmet_ancestor_waves(&db, b).is_empty());
             assert!(are_all_parents_met(&db, b));
         }
+    }
+
+    #[test]
+    fn a_run_member_waits_for_its_parent_to_land_not_merely_to_finish() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+
+        // `testing` is where a finished task parks for review when require_approval
+        // is on. Its branch merges into the trunk on the transition to `done` and not
+        // before, so at this moment the trunk holds none of a's work — and b's
+        // worktree is cut from the trunk. Counting this as met let b run blind:
+        // verified in the app, where C reported every one of its inputs MISSING.
+        set_status(&db, a, "testing");
+        assert_eq!(
+            unmet_parent_ids(&db, b),
+            vec![a],
+            "a parent parked for review has put nothing on the trunk"
+        );
+        assert!(!are_all_parents_met(&db, b));
+        assert!(
+            !get_ready_tasks(&db, 1).iter().any(|t| t.id == b),
+            "and the queue must not offer it either"
+        );
+
+        // Approving it is what merges the branch, and only then may b start.
+        set_status(&db, a, "done");
+        assert!(unmet_parent_ids(&db, b).is_empty());
+        assert!(get_ready_tasks(&db, 1).iter().any(|t| t.id == b));
+    }
+
+    #[test]
+    fn a_task_outside_a_run_still_starts_while_its_parent_is_under_test() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+
+        // No group, so no trunk and no promise about a shared checkout. The stricter
+        // rule above is about the trunk, so it must not leak out here and serialise
+        // every ordinary dependency behind a review.
+        set_status(&db, a, "testing");
+        assert!(unmet_parent_ids(&db, b).is_empty());
+    }
+
+    #[test]
+    fn a_failure_edge_is_unaffected_by_the_trunk_rule() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, Some("on_failure")).unwrap();
+        crate::db::task_groups::create(&db, 1, "trunk/y", "main", b, &[a, b]).unwrap();
+
+        // An on_failure edge wants a failed parent, which never merges anything, so
+        // the extra condition must not touch it.
+        set_status(&db, a, "failed");
+        assert!(unmet_parent_ids(&db, b).is_empty());
     }
 
     #[test]
