@@ -263,5 +263,16 @@ fn send(app: &AppHandle, title: &str, body: &str) {
         }
     }
 
-    builder.show().ok();
+    // Logged rather than discarded. The usual cause is the operating system refusing
+    // the app permission to notify, which every caller here believes succeeded: the
+    // setting is on, the activity row is written, and nothing anywhere says the user
+    // was never told. Reinstalling the bundle is enough to lose the grant, so this is
+    // a state the app arrives at on its own rather than a misconfiguration.
+    if let Err(e) = builder.show() {
+        log::warn!(
+            "could not show the notification {:?} — the operating system may not have granted permission: {}",
+            title,
+            e
+        );
+    }
 }
