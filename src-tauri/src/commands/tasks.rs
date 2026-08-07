@@ -315,6 +315,21 @@ pub fn start_task_with_prerequisites(
     }
 }
 
+/// Whether arriving at this status can free a dependent to run.
+///
+/// Keyed on the destination alone. A guard naming one origin — it was
+/// `AwaitingApproval` — never fired for the others, and with `require_approval` on and
+/// auto-test off a finished task parks in `Testing`, so approving it cascaded nothing.
+/// Observed in the app: the run's next task sat in Backlog with every prerequisite met
+/// and the run active, waiting for a start that had no caller left.
+///
+/// Only `Done` counts. Parking for review is not landing: a group member's branch
+/// reaches the trunk on this transition and not on the one before it, which is the same
+/// fact `edge_is_met_sql` enforces from the other side.
+fn unblocks_dependents(to: TaskStatus) -> bool {
+    to == TaskStatus::Done
+}
+
 /// The stopped run a task belongs to, or a refusal naming why there is nothing to do.
 ///
 /// Both resolution commands go through this. The buttons are only rendered for a
@@ -727,8 +742,8 @@ pub(crate) fn change_status_inner(
         queue::start_next_queued(&db, app, task.project_id);
     }
 
-    // Cascade when approving: AwaitingApproval -> Done unblocks dependents
-    if from == TaskStatus::AwaitingApproval && to == TaskStatus::Done {
+    // Reaching Done is what unblocks dependents, however the task got there.
+    if unblocks_dependents(to) {
         queue::on_task_completed(&db, app, task.project_id, id);
     }
 
@@ -1535,6 +1550,25 @@ mod tests {
 
     fn debt() -> Vec<String> {
         DEBT.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn every_way_into_done_unblocks_what_was_waiting() {
+        // The guard used to name AwaitingApproval as the only origin. With the approval
+        // gate on and auto-test off a finished task parks in Testing instead, so
+        // approving it cascaded nothing and the chain stalled with its next task ready
+        // and unstarted — every prerequisite met, the run active, nobody to start it.
+        assert!(unblocks_dependents(TaskStatus::Done));
+
+        // Parking for review is not landing. A member's branch reaches the trunk on the
+        // transition to Done, so a dependent freed at either of these would build on
+        // work that is not there.
+        assert!(!unblocks_dependents(TaskStatus::Testing));
+        assert!(!unblocks_dependents(TaskStatus::AwaitingApproval));
+        assert!(!unblocks_dependents(TaskStatus::InProgress));
+        assert!(!unblocks_dependents(TaskStatus::Blocked));
+        assert!(!unblocks_dependents(TaskStatus::Failed));
+        assert!(!unblocks_dependents(TaskStatus::Backlog));
     }
 
     #[test]
