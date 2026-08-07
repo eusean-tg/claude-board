@@ -50,6 +50,8 @@ pub fn create_project(
     retry_base_delay_secs: Option<i64>,
     retry_max_delay_secs: Option<i64>,
     auto_test_model: Option<String>,
+    resolve_model: Option<String>,
+    resolve_effort: Option<String>,
     circuit_breaker_threshold: Option<i64>,
     require_approval: Option<bool>,
     pr_provider: Option<String>,
@@ -135,6 +137,8 @@ pub fn create_project(
         || retry_base_delay_secs.is_some()
         || retry_max_delay_secs.is_some()
         || auto_test_model.is_some()
+        || resolve_model.is_some()
+        || resolve_effort.is_some()
     {
         pq::update_engine_settings(
             &db,
@@ -143,6 +147,8 @@ pub fn create_project(
             retry_base_delay_secs.unwrap_or(0),
             retry_max_delay_secs.unwrap_or(0),
             auto_test_model.as_deref().unwrap_or(""),
+            resolve_model.as_deref().unwrap_or(""),
+            resolve_effort.as_deref().unwrap_or(""),
         );
     }
     if let Some(threshold) = circuit_breaker_threshold {
@@ -198,6 +204,8 @@ pub fn update_project(
     retry_base_delay_secs: Option<i64>,
     retry_max_delay_secs: Option<i64>,
     auto_test_model: Option<String>,
+    resolve_model: Option<String>,
+    resolve_effort: Option<String>,
     circuit_breaker_threshold: Option<i64>,
     require_approval: Option<bool>,
     pr_provider: Option<String>,
@@ -280,6 +288,8 @@ pub fn update_project(
         || retry_base_delay_secs.is_some()
         || retry_max_delay_secs.is_some()
         || auto_test_model.is_some()
+        || resolve_model.is_some()
+        || resolve_effort.is_some()
     {
         pq::update_engine_settings(
             &db,
@@ -290,6 +300,12 @@ pub fn update_project(
             auto_test_model
                 .as_deref()
                 .unwrap_or(project.auto_test_model.as_deref().unwrap_or("")),
+            resolve_model
+                .as_deref()
+                .unwrap_or(project.resolve_model.as_deref().unwrap_or("")),
+            resolve_effort
+                .as_deref()
+                .unwrap_or(project.resolve_effort.as_deref().unwrap_or("")),
         );
     }
 

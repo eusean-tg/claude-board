@@ -326,6 +326,11 @@ export default {
   'projectModal.secondsDefault600': 'sec (default: 600)',
   'projectModal.autoTestModel': 'Test Model',
   'projectModal.defaultSonnet': 'Default (Sonnet)',
+  'projectModal.resolveModel': 'Conflict Resolution Model',
+  'projectModal.resolveModelDesc': 'Model for tasks that resolve the merge conflict in a stopped run',
+  'projectModal.defaultOpus': 'Default (Opus)',
+  'projectModal.resolveEffort': 'Conflict Resolution Effort',
+  'projectModal.defaultHigh': 'Default (High)',
   'projectModal.circuitBreaker': 'Circuit Breaker',
   'projectModal.circuitBreakerDesc':
     'Automatically pause the queue after consecutive task failures to prevent cascade failures.',

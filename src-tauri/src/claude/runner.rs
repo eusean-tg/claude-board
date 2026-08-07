@@ -3089,6 +3089,8 @@ After all checks, you MUST output this exact JSON block as your final output:
                                     retry_base_delay_secs: None,
                                     retry_max_delay_secs: None,
                                     auto_test_model: None,
+                                    resolve_model: None,
+                                    resolve_effort: None,
                                     circuit_breaker_threshold: None,
                                     circuit_breaker_active: None,
                                     consecutive_failures: None,
