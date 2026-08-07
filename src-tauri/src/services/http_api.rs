@@ -256,6 +256,13 @@ async fn task_detail(Path(id): Path<i64>) -> impl IntoResponse {
         obj.insert("commits".into(), commits);
         obj.insert("revisions".into(), to_json(&revisions));
         obj.insert("attachments".into(), to_json(&atts));
+        // The Tauri command adds this too, and the two have to agree. Missing here,
+        // the MCP tool's "currently running" line could never appear: whether a task
+        // is running is process state, and the row it serialises does not know.
+        obj.insert(
+            "is_running".into(),
+            serde_json::Value::Bool(crate::claude::runner::is_running(id)),
+        );
     }
     Json(val).into_response()
 }
@@ -1007,6 +1014,73 @@ mod http_route_tests {
             "backlog",
             "the status must not move without the side effects that give it meaning"
         );
+    }
+
+    /// The detail route's shape, which the MCP bridge reads.
+    ///
+    /// `commits` is a list on the wire, not the JSON string the column holds, and it is
+    /// a list even when the task has none. The bridge parsed it a second time, which on
+    /// an empty list asks `JSON.parse` to read `''` — so `get_task_detail` failed with
+    /// "Unexpected end of JSON input" for every task that had not committed anything,
+    /// which is most of them.
+    #[tokio::test]
+    async fn the_detail_route_serves_commits_as_a_list_even_when_there_are_none() {
+        let db = shared_db();
+        let (bare, committed) = (811, 812);
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT OR IGNORE INTO projects (id,name,slug,working_dir)
+                 VALUES (1,'B','b','/repo')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id,project_id,title,status)
+                 VALUES (?1,1,'nothing committed','backlog')",
+                rusqlite::params![bare],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id,project_id,title,status,commits)
+                 VALUES (?1,1,'has commits','done','[\"abc1234\",\"def5678\"]')",
+                rusqlite::params![committed],
+            )
+            .unwrap();
+        }
+
+        let base = serve().await;
+        let client = reqwest::Client::new();
+        let detail = |id: i64| {
+            let (client, url) = (client.clone(), format!("{}/api/tasks/{}/detail", base, id));
+            async move {
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let d = detail(bare).await;
+        assert_eq!(
+            d["commits"],
+            serde_json::json!([]),
+            "an empty list, not null and not a string"
+        );
+        // False for a task that is not running. This route used to serialise the
+        // struct's default and never ask the runner, so the answer was `false`
+        // whatever was happening — a claim only a live process can disprove, so the
+        // truthful case is checked by hand rather than here.
+        assert_eq!(d["is_running"], serde_json::json!(false));
+        assert_eq!(d["revisions"], serde_json::json!([]));
+        assert_eq!(d["attachments"], serde_json::json!([]));
+
+        let d = detail(committed).await;
+        assert_eq!(d["commits"], serde_json::json!(["abc1234", "def5678"]));
     }
 
     #[tokio::test]

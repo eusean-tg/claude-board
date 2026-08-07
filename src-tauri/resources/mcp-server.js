@@ -17,6 +17,21 @@ import { z } from 'zod';
 
 const BASE_URL = process.env.CLAUDE_BOARD_URL || 'http://localhost:4000';
 
+/// A field the board stores as a JSON string but serves parsed, read as a list either
+/// way. `JSON.parse` on an array coerces it to a string first, so parsing an
+/// already-parsed `[]` asks it to parse `''` — "Unexpected end of JSON input", on every
+/// task that has no commits.
+function asList(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 async function api(path, options = {}) {
   // eslint-disable-next-line no-undef
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -80,7 +95,12 @@ server.tool(
     priority: z.number().min(0).max(3).optional().default(0).describe('Priority: 0=none, 1=low, 2=medium, 3=high'),
     model: z.enum(['haiku', 'sonnet', 'opus']).optional().default('sonnet').describe('Claude model to use'),
     acceptance_criteria: z.string().optional().describe('Definition of done — what must be true when task completes'),
-    parent_task_id: z.number().optional().describe('Parent task ID — creates a sub-task linked to the parent. The parent will wait for all sub-tasks to complete before finishing.'),
+    parent_task_id: z
+      .number()
+      .optional()
+      .describe(
+        'Parent task ID — creates a sub-task linked to the parent. The parent will wait for all sub-tasks to complete before finishing.',
+      ),
     tags: z.array(z.string()).optional().describe('Tags/labels for the task (e.g. ["backend", "security"])'),
   },
   async ({ project_id, title, description, task_type, priority, model, acceptance_criteria, parent_task_id, tags }) => {
@@ -170,6 +190,7 @@ server.tool(
   { task_id: z.number().describe('Task ID') },
   async ({ task_id }) => {
     const d = await api(`/api/tasks/${task_id}/detail`);
+    const commits = asList(d.commits);
     const lines = [
       `# ${d.task_key || '#' + d.id} — ${d.title}`,
       `Status: ${d.status} | Type: ${d.task_type} | Model: ${d.model} | Priority: ${d.priority}`,
@@ -179,7 +200,14 @@ server.tool(
       d.is_running ? '⚡ Currently running' : '',
       `\nTokens: ${(d.input_tokens || 0).toLocaleString()} in / ${(d.output_tokens || 0).toLocaleString()} out`,
       d.total_cost > 0 ? `Cost: $${d.total_cost.toFixed(4)}` : '',
-      d.commits && JSON.parse(d.commits || '[]').length > 0 ? `Commits: ${JSON.parse(d.commits).join(', ')}` : '',
+      // Each commit is an object — short/message/author/date — so joining the list
+      // renders "[object Object]" per commit. The short hash and subject are what a
+      // reader wants; the UI's Git tab shows the same two.
+      commits.length > 0
+        ? `\nCommits (${commits.length}):\n${commits
+            .map((c) => `  ${c.short || c.hash || ''} ${c.message || ''}`.trimEnd())
+            .join('\n')}`
+        : '',
       d.revisions?.length > 0
         ? `\nRevisions (${d.revisions.length}):\n${d.revisions.map((r) => `  #${r.revision_number}: ${r.feedback}`).join('\n')}`
         : '',
@@ -242,18 +270,8 @@ server.tool(
   },
   async ({ projectId, tag }) => {
     const artifacts = await api(`/api/projects/${projectId}/artifacts`);
-    const wanted = tag
-      ? artifacts.filter((a) => {
-          try {
-            return JSON.parse(a.tags || '[]').includes(tag);
-          } catch {
-            return false;
-          }
-        })
-      : artifacts;
-    const text = wanted
-      .map((a) => `[${a.id}] ${a.title || a.stored_name} (${a.kind}) ${a.tags || '[]'}`)
-      .join('\n');
+    const wanted = tag ? artifacts.filter((a) => asList(a.tags).includes(tag)) : artifacts;
+    const text = wanted.map((a) => `[${a.id}] ${a.title || a.stored_name} (${a.kind}) ${a.tags || '[]'}`).join('\n');
     return {
       content: [{ type: 'text', text: text || 'No documents stored for this project.' }],
     };
@@ -270,9 +288,7 @@ server.tool(
   {
     projectId: z.number().describe('Project ID'),
     title: z.string().describe('Human-readable title, e.g. "Auth rollout plan"'),
-    kind: z
-      .enum(['plan', 'rfc', 'spec', 'readme', 'doc', 'other'])
-      .describe('What kind of document this is'),
+    kind: z.enum(['plan', 'rfc', 'spec', 'readme', 'doc', 'other']).describe('What kind of document this is'),
     content: z.string().describe('The full markdown body'),
     tags: z
       .array(z.string())
@@ -339,10 +355,7 @@ server.tool(
           'apply together, free_text when you cannot enumerate the answers',
       ),
     question: z.string().describe('The question, in one or two sentences'),
-    header: z
-      .string()
-      .optional()
-      .describe('Two or three words naming the decision, e.g. "Auth flow"'),
+    header: z.string().optional().describe('Two or three words naming the decision, e.g. "Auth flow"'),
     context: z
       .string()
       .optional()
@@ -356,10 +369,7 @@ server.tool(
       )
       .optional()
       .describe('Required for single_choice and multi_choice'),
-    artifactId: z
-      .number()
-      .optional()
-      .describe('The document the question is about, if there is one'),
+    artifactId: z.number().optional().describe('The document the question is about, if there is one'),
     waitSeconds: z
       .number()
       .optional()
