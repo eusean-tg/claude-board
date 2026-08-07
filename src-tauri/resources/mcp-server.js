@@ -142,12 +142,16 @@ server.tool(
 // ─── change_task_status ───
 server.tool(
   'change_task_status',
-  'Move a task to a different status column (backlog, in_progress, testing, done).',
+  'Move a task to a different status column (backlog, in_progress, testing, done). ' +
+    'Not every move is allowed: the board refuses illegal transitions, a task whose ' +
+    'dependencies have not finished, and a task belonging to a dependency run that ' +
+    'stopped. A refusal comes back as an error naming what stands in the way — read it ' +
+    'rather than retrying, since none of them clear on their own.',
   {
     task_id: z.number().describe('Task ID'),
     status: z
       .enum(['backlog', 'in_progress', 'testing', 'done'])
-      .describe('New status. WARNING: moving to in_progress will start Claude automatically.'),
+      .describe('New status. WARNING: moving to in_progress starts a Claude agent on the task.'),
   },
   async ({ task_id, status }) => {
     await api(`/api/tasks/${task_id}/status`, {

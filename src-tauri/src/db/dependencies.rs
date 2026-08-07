@@ -245,6 +245,12 @@ pub fn unmet_ancestor_waves(db: &DbPool, task_id: i64) -> Vec<Vec<Task>> {
 /// Get all backlog tasks in a project that have all dependencies met (ready to run).
 /// Supports conditional dependencies: always/on_success require parent done/testing,
 /// on_failure requires parent to have exhausted retries.
+///
+/// A stopped run's members are never ready. A parent counts as met on its *status*,
+/// and a member whose merge into the trunk was refused still reports `done` — so
+/// without this the queue starts the very tasks the stop exists to hold back, on a
+/// trunk that is missing the work they were told they depend on. Resolving the run
+/// returns it to `active`, which is what makes its members eligible again.
 pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
     let conn = db.lock();
     let sql = format!(
@@ -253,6 +259,11 @@ pub fn get_ready_tasks(db: &DbPool, project_id: i64) -> Vec<Task> {
          WHERE t.project_id = ?1 AND t.status = 'backlog'
          AND COALESCE(t.retry_count, 0) <= CASE WHEN COALESCE(p.max_retries, 0) > 0 THEN p.max_retries ELSE 2 END
          AND (t.retry_after IS NULL OR t.retry_after <= datetime('now','localtime'))
+         AND NOT EXISTS (
+             SELECT 1 FROM task_group_members m
+             JOIN task_groups g ON g.id = m.group_id
+             WHERE m.task_id = t.id AND g.status = 'stopped'
+         )
          AND NOT EXISTS (
              SELECT 1 FROM task_dependencies td
              JOIN tasks parent ON parent.id = td.depends_on_id
@@ -723,5 +734,85 @@ mod tests {
             wave_ids(&unmet_ancestor_waves(&db, c)),
             vec![vec![a], vec![b]]
         );
+    }
+
+    fn ready_ids(db: &DbPool) -> Vec<i64> {
+        get_ready_tasks(db, 1).into_iter().map(|t| t.id).collect()
+    }
+
+    #[test]
+    fn a_task_whose_parent_is_done_is_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+
+        assert_eq!(ready_ids(&db), vec![a]);
+
+        set_status(&db, a, "done");
+
+        assert_eq!(ready_ids(&db), vec![b]);
+    }
+
+    #[test]
+    fn a_stopped_runs_members_are_never_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        // The shape a refused merge leaves behind: the prerequisite reports done, so
+        // b's parents are met, and nothing about b's own row looks wrong.
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+        assert_eq!(ready_ids(&db), vec![b], "ready while the run is active");
+
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+
+        // Starting b here would run it against a trunk missing a's work.
+        assert!(ready_ids(&db).is_empty());
+    }
+
+    #[test]
+    fn resolving_a_stopped_run_makes_its_members_ready_again() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_STOPPED)
+            .unwrap();
+
+        // Carrying the run on returns it to active before starting anything, which is
+        // the whole reason this filter can be unconditional.
+        crate::db::task_groups::set_status(&db, gid, crate::db::task_groups::STATUS_ACTIVE)
+            .unwrap();
+
+        assert_eq!(ready_ids(&db), vec![b]);
+    }
+
+    #[test]
+    fn a_finished_runs_members_stay_ready() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        add_dependency(&db, b, a, None).unwrap();
+        set_status(&db, a, "done");
+        let gid = crate::db::task_groups::create(&db, 1, "trunk/x", "main", b, &[a, b]).unwrap();
+
+        // Only 'stopped' holds work back. A run that completed or was abandoned has
+        // released its tasks, and filtering on membership alone would strand them.
+        for status in [
+            crate::db::task_groups::STATUS_COMPLETED,
+            crate::db::task_groups::STATUS_FAILED,
+        ] {
+            crate::db::task_groups::set_status(&db, gid, status).unwrap();
+            assert_eq!(
+                ready_ids(&db),
+                vec![b],
+                "not ready while the run was {status}"
+            );
+        }
     }
 }

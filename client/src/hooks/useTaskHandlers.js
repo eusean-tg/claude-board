@@ -20,6 +20,38 @@ export function useTaskHandlers({
   closeModal,
   currentProject,
 }) {
+  // Opens the resolution panel for a stopped run. Refreshing the board afterwards is
+  // what clears the markers from every card in the run, not just the one clicked.
+  //
+  // Declared before onStatusChange because that reads it: a useCallback dependency array
+  // is evaluated during render, so a later `const` would be in its temporal dead zone.
+  const onRunStopped = useCallback(
+    (task, { startable } = {}) => {
+      setRunStopped({
+        task,
+        startable,
+        onClose: () => setRunStopped(null),
+        onResolved: async ({ kind, result }) => {
+          setRunStopped(null);
+          if (kind === 'resumed') {
+            addToast(t('toast.runResumed', { count: result?.started?.length ?? 0 }), 'success');
+          } else if (kind === 'startedAnyway') {
+            addToast(t('toast.runOverridden', { title: task.title }), 'info');
+          } else {
+            addToast(t('toast.runAbandoned', { trunk: result?.trunk ?? '' }), 'success');
+          }
+          try {
+            setTasks(await api.getTasks(task.project_id));
+          } catch {
+            // The panel is closed and the toast is shown; a stale marker is a
+            // cosmetic problem the next refresh fixes.
+          }
+        },
+      });
+    },
+    [setRunStopped, addToast, t, setTasks],
+  );
+
   const onStatusChange = useCallback(
     async (taskId, newStatus) => {
       const task = tasks.find((x) => x.id === taskId);
@@ -27,6 +59,16 @@ export function useTaskHandlers({
       const fromStatus = task.status || 'backlog';
 
       if (newStatus === 'in_progress' && fromStatus !== 'in_progress') {
+        // A stopped run comes first, and before the plan is fetched. The backend refuses
+        // this start too, but the remedy is a decision about a branch rather than an
+        // error: the panel names the trunk, offers to resolve the run, and only then
+        // offers to start anyway. Gated on the same statuses the backend gates, so a
+        // resume from Blocked or Testing is untouched.
+        if (task.run_stopped && (fromStatus === 'backlog' || fromStatus === 'failed')) {
+          onRunStopped(task, { startable: true });
+          return;
+        }
+
         // Ask what would run before offering to start it. A task with unfinished
         // prerequisites is refused by the backend, and reacting to that refusal
         // would show an error for something the user is allowed to do — so the plan
@@ -91,7 +133,7 @@ export function useTaskHandlers({
         pendingUpdates.delete(taskId);
       }
     },
-    [tasks, addToast, t, setTasks, setConfirm, setPrerequisites],
+    [tasks, addToast, t, setTasks, setConfirm, setPrerequisites, onRunStopped],
   );
 
   const onCreate = useCallback(
@@ -251,32 +293,6 @@ export function useTaskHandlers({
       } catch {}
     },
     [setTasks],
-  );
-
-  // Opens the resolution panel for a stopped run. Refreshing the board afterwards is
-  // what clears the markers from every card in the run, not just the one clicked.
-  const onRunStopped = useCallback(
-    (task) => {
-      setRunStopped({
-        task,
-        onClose: () => setRunStopped(null),
-        onResolved: async ({ kind, result }) => {
-          setRunStopped(null);
-          if (kind === 'resumed') {
-            addToast(t('toast.runResumed', { count: result?.started?.length ?? 0 }), 'success');
-          } else {
-            addToast(t('toast.runAbandoned', { trunk: result?.trunk ?? '' }), 'success');
-          }
-          try {
-            setTasks(await api.getTasks(task.project_id));
-          } catch {
-            // The panel is closed and the toast is shown; a stale marker is a
-            // cosmetic problem the next refresh fixes.
-          }
-        },
-      });
-    },
-    [setRunStopped, addToast, t, setTasks],
   );
 
   return {

@@ -7,7 +7,7 @@ vi.mock('../../../i18n/I18nProvider', () => ({
   useTranslation: () => ({ t: (k, vars) => (vars ? `${k} ${JSON.stringify(vars)}` : k) }),
 }));
 vi.mock('../../../lib/api', () => ({
-  api: { resumeStoppedRun: vi.fn(), abandonRun: vi.fn() },
+  api: { resumeStoppedRun: vi.fn(), abandonRun: vi.fn(), startDespiteStoppedRun: vi.fn() },
 }));
 
 let RunStoppedModal;
@@ -80,5 +80,45 @@ describe('RunStoppedModal', () => {
     const { container } = render(<RunStoppedModal task={null} onClose={vi.fn()} onResolved={vi.fn()} />);
 
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it('offers no way to start the task when opened from the card marker', () => {
+    render_();
+
+    // Nothing is being started here, so the option would only invite making the
+    // trunk worse than the stop left it.
+    expect(screen.queryByRole('button', { name: /runStopped.startAnyway/i })).toBeNull();
+  });
+
+  it('warns before starting on a trunk that is missing work', () => {
+    render_({ startable: true });
+
+    // The warning is the point — this panel *is* the confirmation for that start.
+    expect(screen.getByText(/runStopped.startAnywayWarning/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /runStopped.startAnyway/i })).toBeInTheDocument();
+  });
+
+  it('starts the task anyway on request', async () => {
+    api.startDespiteStoppedRun.mockResolvedValue({ id: 7, status: 'in_progress' });
+    const onResolved = vi.fn();
+    render_({ startable: true, onResolved });
+
+    click(screen.getByRole('button', { name: /runStopped.startAnyway/i }));
+
+    await waitFor(() => expect(api.startDespiteStoppedRun).toHaveBeenCalledWith(7));
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith(expect.objectContaining({ kind: 'startedAnyway' })));
+  });
+
+  it('keeps the panel open and says why when starting anyway fails', async () => {
+    api.startDespiteStoppedRun.mockRejectedValue(new Error('Blocked by 1 unfinished task(s): dep a'));
+    const onResolved = vi.fn();
+    render_({ startable: true, onResolved });
+
+    click(screen.getByRole('button', { name: /runStopped.startAnyway/i }));
+
+    // Overriding the run does not clear an unmet prerequisite, and the refusal for
+    // that is a different one the user still has to read.
+    await waitFor(() => expect(screen.getByText(/dep a/)).toBeInTheDocument());
+    expect(onResolved).not.toHaveBeenCalled();
   });
 });

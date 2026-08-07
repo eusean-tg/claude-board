@@ -12,8 +12,14 @@ import { useTranslation } from '../../i18n/I18nProvider';
  * re-attempts the merge, so it works whether they merged the branch by hand or
  * fixed whatever caused the conflict. Abandoning releases the tasks and keeps the
  * trunk, because that trunk holds every member's work that did merge.
+ *
+ * `startable` adds a third way out, and only when the panel was opened by trying to
+ * start the task: this is the confirmation for that start, so it says what the trunk
+ * is missing before offering to run against it anyway. Opened from the marker on a
+ * card instead, there is no start to confirm and the option would read as an
+ * invitation to make things worse.
  */
-export default function RunStoppedModal({ task, onClose, onResolved }) {
+export default function RunStoppedModal({ task, onClose, onResolved, startable }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -50,6 +56,22 @@ export default function RunStoppedModal({ task, onClose, onResolved }) {
     }
   };
 
+  // The run stays stopped: the task starts on the trunk as it is, and the branch that
+  // could not merge still has to be dealt with afterwards.
+  const startAnyway = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.startDespiteStoppedRun(task.id);
+      onResolved?.({ kind: 'startedAnyway', result });
+    } catch (e) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <ModalShell
       title={t('runStopped.title')}
@@ -71,6 +93,20 @@ export default function RunStoppedModal({ task, onClose, onResolved }) {
           <p className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
             {error}
           </p>
+        ) : null}
+
+        {startable ? (
+          <div className="mt-4 border-t border-surface-800 pt-3">
+            <p className="text-xs text-surface-400">{t('runStopped.startAnywayWarning')}</p>
+            <button
+              onClick={startAnyway}
+              disabled={busy}
+              className="mt-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-amber-400 hover:bg-amber-500/10 disabled:opacity-40 transition-colors"
+            >
+              <AlertTriangle size={12} />
+              {t('runStopped.startAnyway')}
+            </button>
+          </div>
         ) : null}
 
         <div className="mt-4 flex justify-end gap-2 pt-1">

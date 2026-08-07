@@ -199,6 +199,75 @@ fn guard_dependencies(db: &db::DbPool, task_id: i64) -> Result<(), String> {
     ))
 }
 
+/// Whether a start may proceed over a stopped run.
+///
+/// Only ever [`Self::IgnoreStoppedRun`] for a person who was shown what the trunk is
+/// missing and asked for it anyway. The queue and the MCP bridge always pass
+/// [`Self::None`]: neither can read the warning, and an agent starting a task on a
+/// broken trunk is the failure this whole path exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartOverride {
+    None,
+    IgnoreStoppedRun,
+}
+
+/// Returned when the task id does not exist. A sentinel so the HTTP route can answer
+/// 404 rather than folding "no such task" into the same 400 as a refused start.
+pub(crate) const ERR_NO_TASK: &str = "Task not found";
+
+/// Returned when there is no `AppHandle` yet. A status change cannot be honoured
+/// without one — see [`change_status_inner`] — and the HTTP route answers 503, because
+/// the request was fine and retrying it later will work.
+pub(crate) const ERR_NO_APP: &str = "The app is still starting up — try again in a moment";
+
+/// Refuse to start a task whose run stopped short of putting its work on the trunk.
+///
+/// Separate from [`guard_dependencies`] because the remedy is different. Unmet
+/// prerequisites are answered by running them; this is answered by resolving the run,
+/// and the parents here report `done` — so the dependency guard sees nothing wrong
+/// and would wave the task through onto a trunk missing the work it depends on.
+fn guard_stopped_run(db: &db::DbPool, task_id: i64) -> Result<(), String> {
+    match db::task_groups::stopped_for_task(db, task_id) {
+        None => Ok(()),
+        Some(group) => Err(format!(
+            "This task's run stopped before all of its work reached {}. Resolve the run — carry on or abandon it — before starting this task.",
+            group.trunk_branch
+        )),
+    }
+}
+
+/// Everything that can refuse a status change on the way in.
+///
+/// Split from [`change_status_inner`] so the gates can be tested against a database of
+/// their own: that function reads the process-global pool, which a test cannot replace.
+/// The gates are the part that has to behave identically for the UI and the MCP bridge,
+/// so they are the part worth pinning down.
+///
+/// There is no dependency-blocked state — a task waiting on another task is not in the
+/// same situation as one whose agent asked a question — so a refusal here leaves the
+/// task exactly where it was.
+fn guard_start(
+    db: &db::DbPool,
+    task_id: i64,
+    from: TaskStatus,
+    to: TaskStatus,
+    over: StartOverride,
+) -> Result<(), String> {
+    if to != TaskStatus::InProgress || !start_is_gated(from) {
+        return Ok(());
+    }
+    // The stopped run comes first. When a task has both, the run is the root cause and
+    // the one with something to click; "blocked by 1 unfinished task" would name a
+    // sibling that is itself only waiting on the same run.
+    if over == StartOverride::None {
+        guard_stopped_run(db, task_id)?;
+    }
+    // Never overridable. Overriding a stopped run is a judgement about a trunk the user
+    // can see and inspect; an unmet prerequisite means the work does not exist at all,
+    // and no confirmation makes it exist.
+    guard_dependencies(db, task_id)
+}
+
 /// Run a task by running everything it depends on first.
 ///
 /// The way forward from the refusal `change_task_status` gives a task with unmet
@@ -360,11 +429,79 @@ pub fn change_task_status(
     status: String,
     mcp_port: u16,
 ) -> Result<tq::Task, String> {
+    change_status_inner(Some(&app), id, &status, mcp_port, StartOverride::None)
+}
+
+/// Start a task whose run stopped, on a trunk that may be missing work it depends on.
+///
+/// The escape hatch behind the warning in the stopped-run panel. Deliberately its own
+/// command rather than a flag on [`change_task_status`]: that one is reachable from the
+/// MCP bridge, and the override must not be. A person can read what the trunk is
+/// missing and accept it; an agent cannot.
+#[tauri::command]
+pub fn start_task_despite_stopped_run(
+    app: AppHandle,
+    id: i64,
+    mcp_port: u16,
+) -> Result<tq::Task, String> {
     let db = db::get_db();
-    let task = tq::get_by_id(&db, id).ok_or("Task not found")?;
+    // Read before the start and written after it. Overriding does not resolve the run,
+    // so the trunk is still there to name afterwards — but the start can still be
+    // refused for an unmet prerequisite, and logging first would record a start that
+    // never happened.
+    let trunk = db::task_groups::stopped_for_task(&db, id).map(|g| g.trunk_branch);
+
+    let started = change_status_inner(
+        Some(&app),
+        id,
+        TaskStatus::InProgress.as_str(),
+        mcp_port,
+        StartOverride::IgnoreStoppedRun,
+    )?;
+
+    if let Some(trunk) = trunk {
+        tq::add_log(
+            &db,
+            id,
+            &format!(
+                "Started on {} while its run was stopped. The trunk may be missing work this task depends on.",
+                trunk
+            ),
+            "error",
+            None,
+        );
+        activity::add(
+            &db,
+            started.project_id,
+            Some(id),
+            "run_override",
+            &format!("Started {} over a stopped run", started.title),
+            None,
+        );
+    }
+    Ok(started)
+}
+
+/// The one implementation of a status change, for both the UI and the MCP bridge.
+///
+/// `app` is optional only so the refusals above can be tested without a Tauri app, and
+/// so the HTTP route can answer honestly before the app has finished starting. It is
+/// required before the first write: every side effect of a status change needs it —
+/// starting and stopping the runner above all — and writing the status without them is
+/// what left an MCP-moved task sitting In Progress with no agent, invisible to the
+/// queue because that only ever looks at Backlog.
+pub(crate) fn change_status_inner(
+    app: Option<&AppHandle>,
+    id: i64,
+    status: &str,
+    mcp_port: u16,
+    over: StartOverride,
+) -> Result<tq::Task, String> {
+    let db = db::get_db();
+    let task = tq::get_by_id(&db, id).ok_or(ERR_NO_TASK)?;
 
     // ── Parse & validate via state machine ──
-    let to = TaskStatus::from_str(&status).ok_or("Invalid status")?;
+    let to = TaskStatus::from_str(status).ok_or("Invalid status")?;
     let from = TaskStatus::from_str(task.status.as_deref().unwrap_or("backlog"))
         .unwrap_or(TaskStatus::Backlog);
 
@@ -372,14 +509,12 @@ pub fn change_task_status(
         return Err(format!("Invalid transition: {} -> {}", from, to));
     }
 
-    // ── Dependency gate ──
     // Before the status is written, not after: a refused start leaves the task
-    // exactly where it was, in Backlog, with nothing to roll back. There is no
-    // dependency-blocked state — a task waiting on another task is not in the same
-    // situation as one whose agent asked a question.
-    if to == TaskStatus::InProgress && start_is_gated(from) {
-        guard_dependencies(&db, id)?;
-    }
+    // exactly where it was, in Backlog, with nothing to roll back.
+    guard_start(&db, id, from, to, over)?;
+
+    // Nothing has been written yet, so a missing handle costs nothing to refuse.
+    let app = app.ok_or(ERR_NO_APP)?;
 
     // ── Apply status in DB ──
     tq::update_status(&db, id, to.as_str());
@@ -427,7 +562,7 @@ pub fn change_task_status(
             &format!("Task approved: {}", task.title),
             None,
         );
-        execute_done_side_effects(&db, &app, id, &task);
+        execute_done_side_effects(&db, app, id, &task);
     }
 
     if to == TaskStatus::Backlog {
@@ -466,17 +601,17 @@ pub fn change_task_status(
 
     // Stop runner when leaving active state
     if to != TaskStatus::InProgress && runner::is_running(id) {
-        runner::stop(id, &db, &app);
+        runner::stop(id, &db, app);
     }
 
     // Cascade queue when freeing a slot
     if from == TaskStatus::InProgress && (to == TaskStatus::Done || to == TaskStatus::Testing) {
-        queue::start_next_queued(&db, &app, task.project_id);
+        queue::start_next_queued(&db, app, task.project_id);
     }
 
     // Cascade when approving: AwaitingApproval -> Done unblocks dependents
     if from == TaskStatus::AwaitingApproval && to == TaskStatus::Done {
-        queue::on_task_completed(&db, &app, task.project_id, id);
+        queue::on_task_completed(&db, app, task.project_id, id);
     }
 
     let mut final_task = tq::get_for_ui(&db, id).ok_or("Task not found")?;
@@ -486,7 +621,7 @@ pub fn change_task_status(
     // Propagate status change to both DB roadmap (plan/phase) and file-based
     // GSD roadmap (.planning/ROADMAP.md). Single choke-point so every mutation
     // path keeps the two in sync.
-    crate::services::gsd::apply_task_status_cascade(&db, Some(&app), id);
+    crate::services::gsd::apply_task_status_cascade(&db, Some(app), id);
 
     Ok(final_task)
 }
@@ -1325,5 +1460,130 @@ mod tests {
         // path working is that Blocked is not a gated origin.
         assert!(guard_dependencies(&db, child).is_err());
         assert!(!start_is_gated(TaskStatus::Blocked));
+    }
+
+    /// A stopped run over `members`, targeting the last of them.
+    fn stop_a_run(db: &db::DbPool, members: &[i64]) -> i64 {
+        let target = *members.last().unwrap();
+        let gid = db::task_groups::create(db, 1, "trunk/dep-d", "main", target, members).unwrap();
+        db::task_groups::set_status(db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+        gid
+    }
+
+    fn start(
+        db: &db::DbPool,
+        id: i64,
+        from: TaskStatus,
+        over: StartOverride,
+    ) -> Result<(), String> {
+        guard_start(db, id, from, TaskStatus::InProgress, over)
+    }
+
+    #[test]
+    fn a_stopped_runs_member_is_refused_a_start_and_told_which_trunk() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let d = seed_task(&db, "dep d");
+        db::dependencies::add_dependency(&db, d, a, None).unwrap();
+        // The prerequisite reports done — its merge into the trunk is what failed — so
+        // the dependency guard alone sees nothing wrong with starting d.
+        set_status(&db, a, "done");
+        stop_a_run(&db, &[a, d]);
+
+        assert!(guard_dependencies(&db, d).is_ok());
+        let err = start(&db, d, TaskStatus::Backlog, StartOverride::None).unwrap_err();
+
+        // Naming the trunk is what makes it actionable: that is the branch to merge.
+        assert!(err.contains("trunk/dep-d"), "{err}");
+    }
+
+    #[test]
+    fn the_override_starts_a_stopped_runs_member() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let d = seed_task(&db, "dep d");
+        db::dependencies::add_dependency(&db, d, a, None).unwrap();
+        set_status(&db, a, "done");
+        stop_a_run(&db, &[a, d]);
+
+        assert!(start(&db, d, TaskStatus::Backlog, StartOverride::IgnoreStoppedRun).is_ok());
+    }
+
+    #[test]
+    fn the_override_does_not_reach_the_dependency_gate() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let d = seed_task(&db, "dep d");
+        db::dependencies::add_dependency(&db, d, a, None).unwrap();
+        // a never ran, so d's work does not exist rather than merely sitting on a branch.
+        stop_a_run(&db, &[a, d]);
+
+        let err = start(&db, d, TaskStatus::Backlog, StartOverride::IgnoreStoppedRun).unwrap_err();
+
+        // No confirmation can make an unfinished prerequisite exist, so this refusal
+        // has to survive the override that clears the other one.
+        assert!(err.contains("dep a"), "{err}");
+    }
+
+    #[test]
+    fn a_stopped_run_does_not_block_resuming_a_member_that_is_already_under_way() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let b = seed_task(&db, "dep b");
+        stop_a_run(&db, &[a, b]);
+
+        // A sibling still running when the run stopped keeps running, and answering its
+        // blocker or requesting a revision passes back through In Progress. Gating that
+        // would strand work mid-flight over a run the task is already committed to.
+        for from in [
+            TaskStatus::Blocked,
+            TaskStatus::Testing,
+            TaskStatus::AwaitingApproval,
+            TaskStatus::Done,
+        ] {
+            assert!(
+                start(&db, b, from, StartOverride::None).is_ok(),
+                "refused a resume from {from}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stopped_run_does_not_block_moving_a_member_anywhere_else() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let b = seed_task(&db, "dep b");
+        stop_a_run(&db, &[a, b]);
+
+        // Only starting is gated. Parking the task, failing it, or approving what did
+        // run are all still available while the run waits to be resolved.
+        for to in [
+            TaskStatus::Backlog,
+            TaskStatus::Failed,
+            TaskStatus::Done,
+            TaskStatus::Testing,
+        ] {
+            assert!(
+                guard_start(&db, b, TaskStatus::Backlog, to, StartOverride::None).is_ok(),
+                "refused a move to {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolved_run_stops_refusing_its_members() {
+        let db = test_db();
+        let a = seed_task(&db, "dep a");
+        let d = seed_task(&db, "dep d");
+        let gid = stop_a_run(&db, &[a, d]);
+        assert!(start(&db, d, TaskStatus::Backlog, StartOverride::None).is_err());
+
+        // Carrying the run on returns it to active; abandoning it finishes the group.
+        // Both have to clear the refusal or the tasks are claimed for good.
+        db::task_groups::set_status(&db, gid, db::task_groups::STATUS_ACTIVE).unwrap();
+        assert!(start(&db, d, TaskStatus::Backlog, StartOverride::None).is_ok());
+
+        db::task_groups::finish(&db, gid, db::task_groups::STATUS_FAILED).unwrap();
+        assert!(start(&db, d, TaskStatus::Backlog, StartOverride::None).is_ok());
     }
 }

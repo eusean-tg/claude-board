@@ -83,3 +83,5 @@ Beyond the basic priority ordering above, the queue also considers **critical pa
 The queue supports an automatic pause mechanism when too many tasks fail consecutively. See [Circuit Breaker](/features/circuit-breaker) for configuration and details.
 
 <Warning>Dependencies override queue position. Even if a task has position #1, it won't start until all parent dependencies are met.</Warning>
+
+The queue also passes over any task belonging to a [dependency run that stopped](/features/dependency-runs), however ready it looks. Its parents report done; their work is not on the shared branch. Resolving the run releases them.
