@@ -7,7 +7,12 @@ vi.mock('../../../i18n/I18nProvider', () => ({
   useTranslation: () => ({ t: (k, vars) => (vars ? `${k} ${JSON.stringify(vars)}` : k) }),
 }));
 vi.mock('../../../lib/api', () => ({
-  api: { resumeStoppedRun: vi.fn(), abandonRun: vi.fn(), startDespiteStoppedRun: vi.fn() },
+  api: {
+    resumeStoppedRun: vi.fn(),
+    abandonRun: vi.fn(),
+    startDespiteStoppedRun: vi.fn(),
+    resolveStoppedRun: vi.fn(),
+  },
 }));
 
 let RunStoppedModal;
@@ -119,6 +124,59 @@ describe('RunStoppedModal', () => {
     // Overriding the run does not clear an unmet prerequisite, and the refusal for
     // that is a different one the user still has to read.
     await waitFor(() => expect(screen.getByText(/dep a/)).toBeInTheDocument());
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+  it('offers to resolve the conflict with a task', async () => {
+    api.resolveStoppedRun.mockResolvedValue({ resolveTaskId: 9, created: true });
+    const onResolved = vi.fn();
+    render_({ onResolved });
+
+    click(screen.getByRole('button', { name: /runStopped.resolve$/i }));
+
+    await waitFor(() => expect(api.resolveStoppedRun).toHaveBeenCalledWith(7));
+    await waitFor(() => expect(onResolved).toHaveBeenCalledWith(expect.objectContaining({ kind: 'resolveStarted' })));
+  });
+
+  it('shows who is already resolving instead of offering it twice', () => {
+    // The backend refuses a duplicate too, but the button existing at all would
+    // read as "the first click did nothing".
+    render_({ resolveTask: { id: 9, title: 'Resolve merge conflict', status: 'in_progress' } });
+
+    expect(screen.queryByRole('button', { name: /runStopped.resolve$/i })).toBeNull();
+    expect(screen.getByText(/runStopped.resolving/)).toBeInTheDocument();
+  });
+
+  it('treats a resolution waiting for review as in flight', () => {
+    // Awaiting approval is not spent and not restartable — the user's next move is
+    // reading the resolution, and the hint says so.
+    render_({ resolveTask: { id: 9, title: 'Resolve merge conflict', status: 'awaiting_approval' } });
+
+    expect(screen.queryByRole('button', { name: /runStopped.resolve$/i })).toBeNull();
+    expect(screen.getByText(/runStopped.resolving/)).toBeInTheDocument();
+  });
+
+  it('offers to run a crashed resolve task again', () => {
+    // Its attempt produced no resolution to judge, so this is not a second attempt.
+    render_({ resolveTask: { id: 9, title: 'Resolve merge conflict', status: 'failed' } });
+
+    expect(screen.getByRole('button', { name: /runStopped.resolve$/i })).toBeInTheDocument();
+  });
+
+  it('says when the resolve attempt is spent', () => {
+    render_({ resolveTask: { id: 9, title: 'Resolve merge conflict', status: 'done' } });
+
+    expect(screen.queryByRole('button', { name: /runStopped.resolve$/i })).toBeNull();
+    expect(screen.getByText(/runStopped.resolveSpent/)).toBeInTheDocument();
+  });
+
+  it('keeps the modal open and shows why when resolving is refused', async () => {
+    api.resolveStoppedRun.mockRejectedValue(new Error('nothing left to resolve'));
+    const onResolved = vi.fn();
+    render_({ onResolved });
+
+    click(screen.getByRole('button', { name: /runStopped.resolve$/i }));
+
+    await waitFor(() => expect(screen.getByText(/nothing left to resolve/)).toBeInTheDocument());
     expect(onResolved).not.toHaveBeenCalled();
   });
 });

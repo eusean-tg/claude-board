@@ -15,7 +15,11 @@ pub fn create_tables(conn: &Connection) {
             max_retries INTEGER DEFAULT 0, auto_test INTEGER DEFAULT 0, test_prompt TEXT DEFAULT '',
             github_repo TEXT DEFAULT '', github_sync_enabled INTEGER DEFAULT 0,
             max_auto_revisions INTEGER DEFAULT 0, retry_base_delay_secs INTEGER DEFAULT 0, retry_max_delay_secs INTEGER DEFAULT 0,
-            auto_test_model TEXT DEFAULT '', circuit_breaker_threshold INTEGER DEFAULT 0,
+            auto_test_model TEXT DEFAULT '',
+            -- Model and thinking effort for tasks that resolve a stopped run's
+            -- merge conflict. Empty means the default: Opus at high effort.
+            resolve_model TEXT DEFAULT '', resolve_effort TEXT DEFAULT '',
+            circuit_breaker_threshold INTEGER DEFAULT 0,
             circuit_breaker_active INTEGER DEFAULT 0, consecutive_failures INTEGER DEFAULT 0,
             require_approval INTEGER DEFAULT 0, gsd_enabled INTEGER DEFAULT 0,
             shared_artifact_tag TEXT DEFAULT '',
@@ -319,6 +323,10 @@ pub fn create_tables(conn: &Connection) {
             -- install. set_status validates the name in Rust, where adding a state
             -- costs nothing. See migrate_task_groups_status_check.
             status TEXT DEFAULT 'active',
+            -- The task created to resolve a merge conflict that stopped this run.
+            -- Outlives the run: membership is released when a group finishes, but
+            -- this column is the row's record of how the conflict was handled.
+            resolve_task_id INTEGER,
             created_at DATETIME DEFAULT (datetime('now','localtime')),
             updated_at DATETIME DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -711,6 +719,19 @@ pub fn run_migrations(conn: &Connection) {
             "auto_test_model",
             "ALTER TABLE projects ADD COLUMN auto_test_model TEXT DEFAULT ''",
         ),
+        // Model and thinking effort for tasks that resolve a stopped run's merge
+        // conflict. Empty means the default: Opus at high effort, because a wrong
+        // resolution is silent and lands on the trunk.
+        (
+            "projects",
+            "resolve_model",
+            "ALTER TABLE projects ADD COLUMN resolve_model TEXT DEFAULT ''",
+        ),
+        (
+            "projects",
+            "resolve_effort",
+            "ALTER TABLE projects ADD COLUMN resolve_effort TEXT DEFAULT ''",
+        ),
         // Circuit breaker
         (
             "projects",
@@ -775,6 +796,13 @@ pub fn run_migrations(conn: &Connection) {
             "projects",
             "auto_merge",
             "ALTER TABLE projects ADD COLUMN auto_merge INTEGER DEFAULT 0",
+        ),
+        // The task created to resolve the merge conflict that stopped a run. Kept
+        // after the run ends: the group row is the record of how it was handled.
+        (
+            "task_groups",
+            "resolve_task_id",
+            "ALTER TABLE task_groups ADD COLUMN resolve_task_id INTEGER",
         ),
     ];
 

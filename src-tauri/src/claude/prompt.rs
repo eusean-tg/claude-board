@@ -203,9 +203,14 @@ pub fn build_prompt(
          to the repository as usual.",
         task.id
     ));
+    // Says that the listing carries the path, because an agent that assumes it does
+    // not goes looking for the store on the filesystem instead — which is a search of
+    // the home directory for a location the tool hands over for free.
     parts.push(
         "- **list_artifacts** / **update_artifact** — Find documents saved earlier and \
-         revise one instead of saving a second copy of it."
+         revise one instead of saving a second copy of it. Every entry carries the \
+         absolute path of the live copy: read and edit it there with your own file \
+         tools, and do not go searching the filesystem for the store."
             .into(),
     );
     // Scoped to the task-management tools on purpose. This line used to gate every
@@ -356,6 +361,20 @@ mod tests {
         assert!(
             !prompt.contains("Use these tools when the task description asks you to"),
             "the un-scoped gate is what suppressed save_artifact"
+        );
+    }
+
+    #[test]
+    fn the_prompt_says_the_listing_carries_the_path() {
+        let prompt = minimal_prompt();
+
+        // An agent that does not know the listing includes a path searches for the
+        // store instead. One did: four `find` commands across the home directory,
+        // nineteen seconds, for a fixed location the tool hands over for free.
+        assert!(prompt.contains("absolute path"), "got {}", prompt);
+        assert!(
+            prompt.contains("do not go searching the filesystem"),
+            "the instruction has to rule the search out, not merely offer the path"
         );
     }
 

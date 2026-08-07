@@ -10,5 +10,6 @@ pub mod notification;
 pub mod orchestration;
 pub mod pr_providers;
 pub mod queue;
+pub mod resolve;
 pub mod scanner;
 pub mod webhook;

@@ -33,6 +33,8 @@ pub struct TaskGroup {
     pub base_branch: String,
     pub target_task_id: i64,
     pub status: String,
+    /// The task created to resolve the conflict that stopped this run, if one was.
+    pub resolve_task_id: Option<i64>,
     pub created_at: Option<String>,
 }
 
@@ -46,6 +48,9 @@ fn row_to_group(row: &Row) -> rusqlite::Result<TaskGroup> {
         status: row
             .get::<_, Option<String>>("status")?
             .unwrap_or_else(|| STATUS_ACTIVE.into()),
+        // `.ok().flatten()` like created_at: a row read before the migration ran
+        // has no such column, and a group without a resolve task is the norm.
+        resolve_task_id: row.get("resolve_task_id").ok().flatten(),
         created_at: row.get("created_at").ok().flatten(),
     })
 }
@@ -98,6 +103,23 @@ pub fn create(
     .map_err(AppError::Database)
 }
 
+/// Add a task to a run that is already going.
+///
+/// A plain INSERT, exactly as inside [`create`]: `UNIQUE(task_id)` makes claiming an
+/// already-claimed task an error, and swallowing it would give that task two trunks.
+///
+/// The member joins at the end. `members` is rowid-ordered and the callers that walk
+/// it — merging member branches onto the trunk — want the newcomer's work considered
+/// after the work it was added to deal with.
+pub fn add_member(db: &DbPool, group_id: i64, task_id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO task_group_members (group_id, task_id) VALUES (?1, ?2)",
+        params![group_id, task_id],
+    )?;
+    Ok(())
+}
+
 /// A group by id, whatever its status.
 pub fn get(db: &DbPool, group_id: i64) -> Option<TaskGroup> {
     let conn = db.lock();
@@ -126,6 +148,10 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
     .ok()
 }
 
+/// What a card needs to know about the run its task belongs to: the trunk, the run's
+/// status, and the task resolving its conflict if one was created.
+pub type RunForTask = (String, String, Option<i64>);
+
 /// Trunk branch and run status per task, for every task in a live or stopped group.
 ///
 /// Stopped runs are included because a card whose run needs attention is exactly
@@ -133,13 +159,10 @@ pub fn for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
 /// moment it mattered most.
 ///
 /// One query for the whole board rather than `for_task` per card.
-pub fn trunks_by_task(
-    db: &DbPool,
-    project_id: i64,
-) -> std::collections::HashMap<i64, (String, String)> {
+pub fn trunks_by_task(db: &DbPool, project_id: i64) -> std::collections::HashMap<i64, RunForTask> {
     let conn = db.lock();
     let mut stmt = match conn.prepare(
-        "SELECT m.task_id, g.trunk_branch, g.status FROM task_groups g
+        "SELECT m.task_id, g.trunk_branch, g.status, g.resolve_task_id FROM task_groups g
          JOIN task_group_members m ON m.group_id = g.id
          WHERE g.project_id = ?1 AND g.status IN ('active','stopped')",
     ) {
@@ -153,7 +176,11 @@ pub fn trunks_by_task(
     match stmt.query_map(params![project_id], |r| {
         Ok((
             r.get::<_, i64>(0)?,
-            (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+            (
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ),
         ))
     }) {
         Ok(rows) => out.extend(rows.flatten()),
@@ -183,14 +210,20 @@ pub fn stopped_for_task(db: &DbPool, task_id: i64) -> Option<TaskGroup> {
 ///
 /// The single-task counterpart of [`trunks_by_task`], for the paths that emit one
 /// task rather than a board's worth.
-pub fn run_for_task(db: &DbPool, task_id: i64) -> Option<(String, String)> {
+pub fn run_for_task(db: &DbPool, task_id: i64) -> Option<RunForTask> {
     let conn = db.lock();
     conn.query_row(
-        "SELECT g.trunk_branch, g.status FROM task_groups g
+        "SELECT g.trunk_branch, g.status, g.resolve_task_id FROM task_groups g
          JOIN task_group_members m ON m.group_id = g.id
          WHERE m.task_id = ?1 AND g.status IN ('active','stopped')",
         params![task_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        },
     )
     .ok()
 }
@@ -263,6 +296,20 @@ pub fn members(db: &DbPool, group_id: i64) -> Vec<i64> {
     out
 }
 
+/// Record the task created to resolve this run's conflict.
+///
+/// Written once, never cleared: the run's members are released when it finishes, so
+/// this column is all that is left to say a conflict was resolved and by what.
+pub fn set_resolve_task(db: &DbPool, group_id: i64, task_id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE task_groups SET resolve_task_id=?2, updated_at=datetime('now','localtime')
+         WHERE id=?1",
+        params![group_id, task_id],
+    )?;
+    Ok(())
+}
+
 pub fn set_status(db: &DbPool, group_id: i64, status: &str) -> Result<(), AppError> {
     if !matches!(
         status,
@@ -322,6 +369,53 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_new_member_joins_at_the_end_of_the_run() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let r = seed_task(&db, "resolve");
+        let id = create(&db, 1, "trunk/s", "main", a, &[a]).unwrap();
+
+        add_member(&db, id, r).unwrap();
+
+        // Order matters: members() is rowid-ordered and remerge_stopped_members
+        // walks it front to back, so the resolve task must come after the work it
+        // resolves rather than before it.
+        assert_eq!(members(&db, id), vec![a, r]);
+    }
+
+    #[test]
+    fn a_task_already_claimed_by_a_run_cannot_join_another() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        create(&db, 1, "trunk/one", "main", a, &[a]).unwrap();
+        let two = create(&db, 1, "trunk/two", "main", b, &[b]).unwrap();
+
+        // Silently accepting this would give `a` two trunks and no correct merge
+        // target — the same reason create() uses a plain INSERT.
+        assert!(add_member(&db, two, a).is_err());
+        assert_eq!(members(&db, two), vec![b]);
+    }
+
+    #[test]
+    fn the_resolve_task_is_recorded_and_survives_the_runs_end() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let r = seed_task(&db, "resolve");
+        let id = create(&db, 1, "trunk/s", "main", a, &[a]).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, None);
+
+        set_resolve_task(&db, id, r).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, Some(r));
+
+        // finish() deletes membership but keeps the group row — and this column is
+        // the row's record of how the conflict was handled. Losing it on finish
+        // would erase the audit trail the feature promises.
+        finish(&db, id, STATUS_COMPLETED).unwrap();
+        assert_eq!(get(&db, id).unwrap().resolve_task_id, Some(r));
     }
 
     #[test]
@@ -441,11 +535,11 @@ mod tests {
 
         assert_eq!(
             map.get(&a),
-            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string(), None))
         );
         assert_eq!(
             map.get(&b),
-            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string()))
+            Some(&("trunk/live".to_string(), STATUS_ACTIVE.to_string(), None))
         );
         // A landed group's trunk is deleted, so showing it on a card would name a
         // branch that is gone.
@@ -510,7 +604,11 @@ mod tests {
         // Filtering to active made the marker disappear exactly then.
         assert_eq!(
             map.get(&a),
-            Some(&("trunk/stopped".to_string(), STATUS_STOPPED.to_string()))
+            Some(&(
+                "trunk/stopped".to_string(),
+                STATUS_STOPPED.to_string(),
+                None
+            ))
         );
         // And the trunk still resolves, so a member finishing late lands on it
         // rather than on the project's base branch.

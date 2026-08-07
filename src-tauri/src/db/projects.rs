@@ -34,6 +34,8 @@ pub struct Project {
     pub retry_base_delay_secs: Option<i64>,
     pub retry_max_delay_secs: Option<i64>,
     pub auto_test_model: Option<String>,
+    pub resolve_model: Option<String>,
+    pub resolve_effort: Option<String>,
     pub circuit_breaker_threshold: Option<i64>,
     pub circuit_breaker_active: Option<i64>,
     pub consecutive_failures: Option<i64>,
@@ -90,6 +92,8 @@ fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         retry_base_delay_secs: row.get("retry_base_delay_secs").ok().flatten(),
         retry_max_delay_secs: row.get("retry_max_delay_secs").ok().flatten(),
         auto_test_model: row.get("auto_test_model").ok().flatten(),
+        resolve_model: row.get("resolve_model").ok().flatten(),
+        resolve_effort: row.get("resolve_effort").ok().flatten(),
         circuit_breaker_threshold: row.get("circuit_breaker_threshold").ok().flatten(),
         circuit_breaker_active: row.get("circuit_breaker_active").ok().flatten(),
         consecutive_failures: row.get("consecutive_failures").ok().flatten(),
@@ -272,6 +276,7 @@ pub fn update_github_settings(db: &DbPool, id: i64, github_repo: &str, github_sy
     ) { log::error!("update_github_settings: {}", e); }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_engine_settings(
     db: &DbPool,
     id: i64,
@@ -279,11 +284,13 @@ pub fn update_engine_settings(
     retry_base_delay_secs: i64,
     retry_max_delay_secs: i64,
     auto_test_model: &str,
+    resolve_model: &str,
+    resolve_effort: &str,
 ) {
     let conn = db.lock();
     if let Err(e) = conn.execute(
-        "UPDATE projects SET max_auto_revisions=?1,retry_base_delay_secs=?2,retry_max_delay_secs=?3,auto_test_model=?4,updated_at=datetime('now','localtime') WHERE id=?5",
-        params![max_auto_revisions, retry_base_delay_secs, retry_max_delay_secs, auto_test_model, id],
+        "UPDATE projects SET max_auto_revisions=?1,retry_base_delay_secs=?2,retry_max_delay_secs=?3,auto_test_model=?4,resolve_model=?5,resolve_effort=?6,updated_at=datetime('now','localtime') WHERE id=?7",
+        params![max_auto_revisions, retry_base_delay_secs, retry_max_delay_secs, auto_test_model, resolve_model, resolve_effort, id],
     ) { log::error!("update_engine_settings: {}", e); }
 }
 

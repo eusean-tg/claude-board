@@ -25,7 +25,7 @@ import {
   BadgeCheck,
 } from 'lucide-react';
 import Avatar from 'boring-avatars';
-import { AVATAR_VARIANTS, AVATAR_COLORS } from '../../lib/constants';
+import { AVATAR_VARIANTS, AVATAR_COLORS, EFFORT_OPTIONS } from '../../lib/constants';
 import { useTranslation } from '../../i18n/I18nProvider';
 import { api } from '../../lib/api';
 import { IS_TAURI } from '../../lib/tauriEvents';
@@ -92,6 +92,8 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
   const [retryBaseDelay, setRetryBaseDelay] = useState(project?.retry_base_delay_secs || 0);
   const [retryMaxDelay, setRetryMaxDelay] = useState(project?.retry_max_delay_secs || 0);
   const [autoTestModel, setAutoTestModel] = useState(project?.auto_test_model || '');
+  const [resolveModel, setResolveModel] = useState(project?.resolve_model || '');
+  const [resolveEffort, setResolveEffort] = useState(project?.resolve_effort || '');
   const [circuitBreakerThreshold, setCircuitBreakerThreshold] = useState(project?.circuit_breaker_threshold || 0);
   const [requireApproval, setRequireApproval] = useState(!!project?.require_approval);
   const [prProvider, setPrProvider] = useState(project?.pr_provider || 'auto');
@@ -212,6 +214,8 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
         retryBaseDelaySecs: retryBaseDelay || 0,
         retryMaxDelaySecs: retryMaxDelay || 0,
         autoTestModel: autoTestModel || '',
+        resolveModel: resolveModel || '',
+        resolveEffort: resolveEffort || '',
         circuitBreakerThreshold: circuitBreakerThreshold || 0,
         requireApproval: !!requireApproval,
         prProvider: prProvider || 'auto',
@@ -723,6 +727,37 @@ export default function ProjectModal({ project, onSubmit, onClose }) {
                             />
                             <span className="text-xs text-surface-500">{t('projectModal.secondsDefault600')}</span>
                           </div>
+                        </Field>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <Field label={t('projectModal.resolveModel')} hint={t('projectModal.resolveModelDesc')}>
+                          <select
+                            value={resolveModel || ''}
+                            onChange={(e) => setResolveModel(e.target.value)}
+                            className="input-field"
+                          >
+                            <option value="">{t('projectModal.defaultOpus')}</option>
+                            {availableModels.map((m) => (
+                              <option key={m.value} value={m.value}>
+                                {m.label}
+                                {m.source === 'custom' ? ' (custom)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label={t('projectModal.resolveEffort')}>
+                          <select
+                            value={resolveEffort || ''}
+                            onChange={(e) => setResolveEffort(e.target.value)}
+                            className="input-field"
+                          >
+                            <option value="">{t('projectModal.defaultHigh')}</option>
+                            {EFFORT_OPTIONS.map((e) => (
+                              <option key={e.value} value={e.value}>
+                                {t(`effort.${e.value}`)}
+                              </option>
+                            ))}
+                          </select>
                         </Field>
                       </div>
                     </div>

@@ -147,6 +147,8 @@ pub struct EngineConfig {
     pub retry_base_delay_secs: i64,
     pub retry_max_delay_secs: i64,
     pub auto_test_model: String,
+    pub resolve_model: String,
+    pub resolve_effort: String,
 }
 
 impl EngineConfig {
@@ -156,6 +158,14 @@ impl EngineConfig {
     pub const DEFAULT_RETRY_BASE_DELAY: i64 = 30;
     pub const DEFAULT_RETRY_MAX_DELAY: i64 = 600;
     pub const DEFAULT_AUTO_TEST_MODEL: &'static str = "sonnet";
+    /// A capable model at high effort for resolving merge conflicts, where the
+    /// cost and the risk point opposite ways: conflicts are rare — roughly one per
+    /// chain, not one per task — and their diffs are small, so the larger model
+    /// costs little; while a wrong resolution is silent, lands on the trunk, and
+    /// poisons every task built on top of it. A project that would rather trade
+    /// the other way can set both per project.
+    pub const DEFAULT_RESOLVE_MODEL: &'static str = "opus";
+    pub const DEFAULT_RESOLVE_EFFORT: &'static str = "high";
 
     /// Build config from project settings, falling back to defaults.
     pub fn from_project(project: &crate::db::projects::Project) -> Self {
@@ -173,14 +183,29 @@ impl EngineConfig {
                 project.retry_max_delay_secs,
                 Self::DEFAULT_RETRY_MAX_DELAY,
             ),
-            auto_test_model: {
-                let v = project.auto_test_model.as_deref().unwrap_or("");
-                if v.is_empty() {
-                    Self::DEFAULT_AUTO_TEST_MODEL.to_string()
-                } else {
-                    v.to_string()
-                }
-            },
+            auto_test_model: Self::resolve_str(
+                project.auto_test_model.as_deref(),
+                Self::DEFAULT_AUTO_TEST_MODEL,
+            ),
+            resolve_model: Self::resolve_str(
+                project.resolve_model.as_deref(),
+                Self::DEFAULT_RESOLVE_MODEL,
+            ),
+            resolve_effort: Self::resolve_str(
+                project.resolve_effort.as_deref(),
+                Self::DEFAULT_RESOLVE_EFFORT,
+            ),
+        }
+    }
+
+    /// Resolve an optional text setting: absent or empty means the default.
+    ///
+    /// Empty rather than NULL is what the UI writes when a select is left on its
+    /// "Default" option, and what the column defaults to on a fresh install.
+    fn resolve_str(val: Option<&str>, default: &str) -> String {
+        match val {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => default.to_string(),
         }
     }
 
@@ -298,5 +323,31 @@ mod tests {
         // treat a missing process as a crash; and the user still has a way out.
         assert!(!TaskStatus::Blocked.expects_runner());
         assert!(!TaskStatus::Blocked.is_terminal());
+    }
+
+    /// A project row carrying only the two resolve settings; every other column
+    /// deserialises to its zero value, which is what an untouched project has.
+    fn project_with(model: Option<&str>, effort: Option<&str>) -> crate::db::projects::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "B", "slug": "b", "working_dir": "/repo",
+            "resolve_model": model, "resolve_effort": effort,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_resolve_model_defaults_to_opus_at_high_effort() {
+        // The default is a decision, not an accident — see the constants' doc
+        // comment. Empty string is the "use default" convention auto_test_model set.
+        let config = EngineConfig::from_project(&project_with(None, None));
+        assert_eq!(config.resolve_model, "opus");
+        assert_eq!(config.resolve_effort, "high");
+    }
+
+    #[test]
+    fn a_project_may_choose_its_own_resolve_model_and_effort() {
+        let config = EngineConfig::from_project(&project_with(Some("sonnet"), Some("medium")));
+        assert_eq!(config.resolve_model, "sonnet");
+        assert_eq!(config.resolve_effort, "medium");
     }
 }

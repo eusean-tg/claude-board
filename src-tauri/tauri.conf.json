@@ -44,7 +44,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3RjU4MjY0OTk0NjE5NjEKUldSaEdVYVpaSUwxRndQUFN5S0REb1dBNVJscG1rdHdjd3kwOEpZeGdzVjA1Y0UyZCttY1dXTisK",
       "endpoints": [
-        "https://github.com/bahri-hirfanoglu/claude-board/releases/latest/download/latest.json"
+        "https://github.com/eusean-tg/claude-board/releases/latest/download/latest.json"
       ]
     },
     "shell": {
