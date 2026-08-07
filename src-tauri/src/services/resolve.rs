@@ -49,14 +49,14 @@ pub fn resolve_task_description(trunk: &str, branches: &[String]) -> String {
         .map(|b| format!("    git merge {}", b))
         .collect::<Vec<_>>()
         .join("\n");
-    let (subject, verb) = if branches.len() == 1 {
-        ("branch", "could not be merged")
+    let subject = if branches.len() == 1 {
+        "branch"
     } else {
-        ("branches", "could not be merged")
+        "branches"
     };
 
     format!(
-        "A dependency run on this board has stopped: the {subject} {named} {verb}\n\
+        "A dependency run on this board has stopped: the {subject} {named} could not be merged\n\
          into the run's shared branch `{trunk}` because the merge conflicted.\n\
          Your working directory is a checkout of a branch cut from `{trunk}`, so the\n\
          run's merged work is already here. Your job is to bring the refused work in\n\
