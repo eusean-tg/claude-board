@@ -103,6 +103,23 @@ pub fn create(
     .map_err(AppError::Database)
 }
 
+/// Add a task to a run that is already going.
+///
+/// A plain INSERT, exactly as inside [`create`]: `UNIQUE(task_id)` makes claiming an
+/// already-claimed task an error, and swallowing it would give that task two trunks.
+///
+/// The member joins at the end. `members` is rowid-ordered and the callers that walk
+/// it — merging member branches onto the trunk — want the newcomer's work considered
+/// after the work it was added to deal with.
+pub fn add_member(db: &DbPool, group_id: i64, task_id: i64) -> Result<(), AppError> {
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO task_group_members (group_id, task_id) VALUES (?1, ?2)",
+        params![group_id, task_id],
+    )?;
+    Ok(())
+}
+
 /// A group by id, whatever its status.
 pub fn get(db: &DbPool, group_id: i64) -> Option<TaskGroup> {
     let conn = db.lock();
@@ -341,6 +358,35 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_new_member_joins_at_the_end_of_the_run() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let r = seed_task(&db, "resolve");
+        let id = create(&db, 1, "trunk/s", "main", a, &[a]).unwrap();
+
+        add_member(&db, id, r).unwrap();
+
+        // Order matters: members() is rowid-ordered and remerge_stopped_members
+        // walks it front to back, so the resolve task must come after the work it
+        // resolves rather than before it.
+        assert_eq!(members(&db, id), vec![a, r]);
+    }
+
+    #[test]
+    fn a_task_already_claimed_by_a_run_cannot_join_another() {
+        let db = test_db();
+        let a = seed_task(&db, "a");
+        let b = seed_task(&db, "b");
+        create(&db, 1, "trunk/one", "main", a, &[a]).unwrap();
+        let two = create(&db, 1, "trunk/two", "main", b, &[b]).unwrap();
+
+        // Silently accepting this would give `a` two trunks and no correct merge
+        // target — the same reason create() uses a plain INSERT.
+        assert!(add_member(&db, two, a).is_err());
+        assert_eq!(members(&db, two), vec![b]);
     }
 
     #[test]
