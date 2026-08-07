@@ -353,6 +353,7 @@ pub fn run() {
             commands::tasks::plan_prerequisites,
             commands::tasks::resume_stopped_run,
             commands::tasks::abandon_run,
+            commands::tasks::resolve_stopped_run,
             commands::tasks::delete_task,
             commands::tasks::get_task_logs,
             commands::tasks::stop_task,

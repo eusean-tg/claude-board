@@ -364,6 +364,123 @@ pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Va
     }
 }
 
+/// What clicking Resolve should do.
+#[derive(Debug)]
+enum ResolveAction {
+    /// Nothing has been tried: create a task for these branches and start it.
+    Create(Vec<String>),
+    /// A resolve task exists but never ran to a conclusion. Run it again.
+    Restart(i64),
+    /// Say why, and change nothing.
+    Refuse(String),
+}
+
+/// Decide what Resolve does for this run, given the branches it still owes.
+///
+/// Separate from the command so the one-attempt rule can be tested without an app or
+/// a repository: the branch debt arrives as an argument, and every other input is a
+/// row. One resolve task per run, ever — no arm below creates a second while the
+/// first exists in any status.
+fn plan_resolve(
+    db: &db::DbPool,
+    group: &db::task_groups::TaskGroup,
+    unresolved: &[String],
+) -> ResolveAction {
+    let existing = group
+        .resolve_task_id
+        .and_then(|id| tq::get_by_id(db, id).map(|t| (id, t)));
+
+    if let Some((id, task)) = &existing {
+        let status = task.status.as_deref().unwrap_or("");
+        let in_flight = matches!(
+            status,
+            "in_progress" | "blocked" | "testing" | "awaiting_approval"
+        ) || runner::is_running(*id)
+            || runner::is_starting(*id);
+        if in_flight {
+            // An unreviewed resolution is in flight, not spent. The panel hides the
+            // button in this state too, so reaching here means a stale board.
+            return ResolveAction::Refuse(format!(
+                "This run is already being resolved by \"{}\"",
+                task.title
+            ));
+        }
+    }
+
+    if unresolved.is_empty() {
+        return ResolveAction::Refuse(
+            "There is nothing left to merge into this run's branch — use Carry on".to_string(),
+        );
+    }
+
+    match existing {
+        // The attempt crashed out or was never started. Another go at the same task
+        // is not a second attempt: the first produced no resolution to judge.
+        Some((id, task)) if matches!(task.status.as_deref(), Some("backlog") | Some("failed")) => {
+            ResolveAction::Restart(id)
+        }
+        // Done, and the run is still stopped: the resolution was rejected at the
+        // gate, or something else was refused afterwards. A second agent pass is the
+        // retry loop the one-attempt rule exists to prevent.
+        Some(_) => ResolveAction::Refuse(
+            "This run has already used its resolve attempt — merge by hand and carry on, or abandon the run"
+                .to_string(),
+        ),
+        // A resolve task the user deleted leaves nothing to inspect and nothing to
+        // restart, so it holds nothing against the run.
+        None => ResolveAction::Create(unresolved.to_vec()),
+    }
+}
+
+/// Resolve a stopped run by putting a task on the board to perform the merge.
+///
+/// The task joins the run, so its worktree branches from the trunk and the run's
+/// merged work is already in front of the agent. The run **stays stopped** while it
+/// works: that is what holds the other members back, and it is why no resolution can
+/// ever spawn another — a stop only fires for an active run.
+///
+/// Starting it needs [`StartOverride::IgnoreStoppedRun`], since it is a member of a
+/// stopped run. That is the point rather than a workaround: putting the missing work
+/// on the trunk is this task's job.
+#[tauri::command]
+pub fn resolve_stopped_run(
+    app: AppHandle,
+    task_id: i64,
+    mcp_port: u16,
+) -> Result<serde_json::Value, String> {
+    let db = db::get_db();
+    let group = resolvable_run(&db, task_id)?;
+    let project = pq::get_by_id(&db, group.project_id).ok_or("Project not found")?;
+    let unresolved = runner::unresolved_member_branches(&db, &group, &project.working_dir);
+
+    let (resolve_id, created) = match plan_resolve(&db, &group, &unresolved) {
+        ResolveAction::Refuse(msg) => return Err(msg),
+        ResolveAction::Restart(id) => (id, false),
+        ResolveAction::Create(branches) => (
+            crate::services::resolve::create_resolve_task(&db, &project, &group, &branches)?,
+            true,
+        ),
+    };
+
+    change_status_inner(
+        Some(&app),
+        resolve_id,
+        TaskStatus::InProgress.as_str(),
+        mcp_port,
+        StartOverride::IgnoreStoppedRun,
+    )?;
+
+    // The new card and the panel's changed hint both arrive this way; nothing on the
+    // board polls, so a run whose members are not re-emitted keeps its old counts.
+    for member in db::task_groups::members(&db, group.id) {
+        if let Some(task) = tq::get_for_ui(&db, member) {
+            app.emit("task:updated", &task).ok();
+        }
+    }
+
+    Ok(serde_json::json!({"resolveTaskId": resolve_id, "created": created}))
+}
+
 /// Give up on a stopped run, releasing its tasks so they can run in another.
 ///
 /// The trunk is left alone. It holds whatever did merge, and deleting it here would
@@ -1336,6 +1453,129 @@ mod tests {
                 params![id, status],
             )
             .unwrap();
+    }
+
+    /// A stopped run over one member, and the debt it stopped owing.
+    fn stopped_run(db: &db::DbPool) -> db::task_groups::TaskGroup {
+        let a = seed_task(db, "a");
+        let gid = db::task_groups::create(db, 1, "trunk/r", "main", a, &[a]).unwrap();
+        db::task_groups::set_status(db, gid, db::task_groups::STATUS_STOPPED).unwrap();
+        db::task_groups::get(db, gid).unwrap()
+    }
+
+    /// Attach a resolve task in `status` to `group`, as create_resolve_task would,
+    /// refreshing the caller's copy of the group so it carries the new id.
+    fn with_resolve_task(
+        db: &db::DbPool,
+        group: &mut db::task_groups::TaskGroup,
+        status: &str,
+    ) -> i64 {
+        let r = seed_task(db, "Resolve merge conflict: feature/x → trunk/r");
+        set_status(db, r, status);
+        db::task_groups::add_member(db, group.id, r).unwrap();
+        db::task_groups::set_resolve_task(db, group.id, r).unwrap();
+        *group = db::task_groups::get(db, group.id).unwrap();
+        r
+    }
+
+    const DEBT: [&str; 1] = ["feature/x"];
+
+    fn debt() -> Vec<String> {
+        DEBT.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resolving_creates_one_task_when_none_exists() {
+        let db = test_db();
+        let group = stopped_run(&db);
+
+        assert!(matches!(
+            plan_resolve(&db, &group, &debt()),
+            ResolveAction::Create(ref b) if b == &debt()
+        ));
+    }
+
+    #[test]
+    fn a_run_being_resolved_refuses_a_second_resolve_task() {
+        // The no-recursion rule as a guard rather than a hope: while a resolution is
+        // in flight — running, blocked on a question, or waiting for review — the
+        // answer to "resolve this" is "it already is".
+        for status in ["in_progress", "blocked", "testing", "awaiting_approval"] {
+            let db = test_db();
+            let mut group = stopped_run(&db);
+            with_resolve_task(&db, &mut group, status);
+
+            match plan_resolve(&db, &group, &debt()) {
+                ResolveAction::Refuse(msg) => assert!(
+                    msg.contains("Resolve merge conflict"),
+                    "the refusal names the task at {status}: {msg}"
+                ),
+                other => panic!("expected a refusal at {status}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_crashed_resolve_task_is_restarted_rather_than_duplicated() {
+        for status in ["failed", "backlog"] {
+            let db = test_db();
+            let mut group = stopped_run(&db);
+            let r = with_resolve_task(&db, &mut group, status);
+
+            // Same task again is not a second attempt in the one-attempt sense: the
+            // first never produced a resolution to judge.
+            assert!(
+                matches!(plan_resolve(&db, &group, &debt()), ResolveAction::Restart(id) if id == r),
+                "at {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_resolve_attempt_is_refused_for_good() {
+        // The resolve task is done and the run is still stopped — the gate
+        // quarantined its work, or a second branch was refused later. Another agent
+        // pass is exactly the retry loop the one-attempt rule forbids; the user
+        // resolves by hand, starts anyway, or abandons.
+        let db = test_db();
+        let mut group = stopped_run(&db);
+        with_resolve_task(&db, &mut group, "done");
+
+        assert!(matches!(
+            plan_resolve(&db, &group, &debt()),
+            ResolveAction::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn a_run_with_nothing_unresolved_is_sent_to_carry_on() {
+        // A resolve task with an empty job would run an agent to do nothing and then
+        // report success. The user merged by hand; Carry on is the button they want.
+        let db = test_db();
+        let group = stopped_run(&db);
+
+        match plan_resolve(&db, &group, &[]) {
+            ResolveAction::Refuse(msg) => assert!(msg.contains("Carry on"), "got: {msg}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_resolve_task_the_user_deleted_is_not_held_against_the_run() {
+        // Deleting the card takes its membership and its edges with it, so refusing
+        // with "this run already used its resolve attempt" would name a task that is
+        // not on the board. Nothing is left to inspect, so nothing is spent.
+        let db = test_db();
+        let mut group = stopped_run(&db);
+        let r = with_resolve_task(&db, &mut group, "done");
+        db.lock()
+            .execute("DELETE FROM tasks WHERE id=?1", params![r])
+            .unwrap();
+
+        assert!(matches!(
+            plan_resolve(&db, &group, &debt()),
+            ResolveAction::Create(_)
+        ));
     }
 
     #[test]
