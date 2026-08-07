@@ -333,7 +333,8 @@ pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Va
     let group = resolvable_run(&db, task_id)?;
     let project = pq::get_by_id(&db, group.project_id).ok_or("Project not found")?;
 
-    match runner::remerge_stopped_members(&db, &group, &project.working_dir) {
+    let members = db::task_groups::members(&db, group.id);
+    match runner::carry_run_on(&db, Some(&app), &group, &project.working_dir, task_id) {
         runner::RunResumeOutcome::StillRefused { branch, refusal } => Err(format!(
             "{} still cannot be merged into {}: {}",
             branch,
@@ -341,24 +342,10 @@ pub fn resume_stopped_run(app: AppHandle, task_id: i64) -> Result<serde_json::Va
             refusal.reason()
         )),
         runner::RunResumeOutcome::Ready { merged } => {
-            db::task_groups::set_status(&db, group.id, db::task_groups::STATUS_ACTIVE)
-                .map_err(|e| e.to_string())?;
-            let members = db::task_groups::members(&db, group.id);
-            queue::start_group_members(&db, &app, group.project_id, group.id);
             let started: Vec<i64> = members
                 .into_iter()
                 .filter(|id| runner::is_running(*id) || runner::is_starting(*id))
                 .collect();
-            activity::add(
-                &db,
-                group.project_id,
-                Some(task_id),
-                "run_resumed",
-                &format!("Dependency run resumed on {}", group.trunk_branch),
-                None,
-            );
-            app.emit("task:updated", &serde_json::json!({"resumed": group.id}))
-                .ok();
             Ok(serde_json::json!({"resumed": true, "merged": merged, "started": started}))
         }
     }
@@ -473,9 +460,7 @@ pub fn resolve_stopped_run(
     // The new card and the panel's changed hint both arrive this way; nothing on the
     // board polls, so a run whose members are not re-emitted keeps its old counts.
     for member in db::task_groups::members(&db, group.id) {
-        if let Some(task) = tq::get_for_ui(&db, member) {
-            app.emit("task:updated", &task).ok();
-        }
+        runner::emit_task_updated(&db, &app, member);
     }
 
     Ok(serde_json::json!({"resolveTaskId": resolve_id, "created": created}))
